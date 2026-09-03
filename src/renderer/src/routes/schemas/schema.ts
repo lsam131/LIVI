@@ -1,4 +1,5 @@
 import type { Config } from '@shared/types'
+import { customSettingsSchemas } from '../../custom/settingsSchema'
 import { generateRoutes } from '../../utils/generateRoutes'
 import { SettingsNode } from '../types'
 import { appearanceSchema } from './appearanceSchema'
@@ -14,7 +15,15 @@ export const settingsSchema: SettingsNode<Config> = {
   label: 'Settings', // TODO deleted in favor of i18n
   labelKey: 'settings.settingsTitle',
   path: 'settings',
-  children: [devicesSchema, generalSchema, audioSchema, videoSchema, appearanceSchema, systemSchema]
+  children: [
+    devicesSchema,
+    generalSchema,
+    audioSchema,
+    videoSchema,
+    appearanceSchema,
+    systemSchema,
+    ...customSettingsSchemas // 客製化掛鉤點 T6
+  ]
 }
 
 export const settingsRoutes = generateRoutes(settingsSchema)

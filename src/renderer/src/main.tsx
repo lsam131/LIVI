@@ -19,6 +19,7 @@ import '@fontsource/roboto/700.css'
 import { THEME } from './constants'
 import { AppContext, type AppContextProps } from './context'
 import './i18n'
+import { initCustomRenderer } from './custom'
 import { getWindowRole } from './utils/windowRole'
 
 const role = getWindowRole()
@@ -31,6 +32,8 @@ else if (role === 'aux') document.title = 'Auxiliary'
 
 // Under the livi-compositor the window is transparent so the GPU video plane behind it shows through
 if (window.app?.compositor) document.documentElement.classList.add('compositor')
+
+initCustomRenderer() // 客製化掛鉤點 T3
 
 export const Root = () => {
   const settings = useLiviStore((s) => s.settings)

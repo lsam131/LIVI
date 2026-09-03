@@ -1,0 +1,12 @@
+/*
+ * 版面覆寫。
+ *
+ * 一律用 html[data-profile="..."] 當作用域，未套用 profile 時這裡的規則
+ * 全部不生效，等於零風險。profile 由 custom.json 的 uiProfile 決定，
+ * 在 initCustomRenderer() 寫進 <html>。
+ *
+ * 這樣做的用意是避免去改上游的 index.html、AppLayout.tsx 與 theme.ts，
+ * 那三支是版面相關但改動衝突率最高的檔案。
+ *
+ * 骨架階段沒有任何規則；Phase 2 的 720x480 版面會加在這裡。
+ */

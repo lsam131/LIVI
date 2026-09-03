@@ -4,6 +4,7 @@ import type { RouteObject } from 'react-router'
 import { Layout } from '../components/layouts/Layout'
 import { Camera, Custom, Media, Telemetry } from '../components/pages'
 import { SettingsPage } from '../components/pages/settings/SettingsPage'
+import { customRoutes } from '../custom/routes'
 import { settingsRoutes } from './schemas/schema'
 
 const elements: Partial<Record<ROUTES, ReactElement>> = {
@@ -29,6 +30,6 @@ export const appRoutes: RouteObject[] = [
       }
       const element = elements[path]
       return element ? [{ path, element }] : []
-    })
+    }).concat(customRoutes) // 客製化掛鉤點 T4
   }
 ]
