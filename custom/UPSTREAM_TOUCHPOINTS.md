@@ -3,15 +3,15 @@
 > 這份檔案是**合併上游新版時的檢查表**。
 > 自動驗證：`bash custom/scripts/check-touchpoints.sh`
 
-我們對上游檔案的改動只有以下七處，每一處都只是「呼叫我們的模組」，沒有任何
+我們對上游檔案的改動只有以下八處，每一處都只是「呼叫我們的模組」，沒有任何
 客製化邏輯寫在上游檔案裡。所有實作都在 `src/main/custom/`、
 `src/preload/custom.ts`、`src/renderer/src/custom/` 這三個地方。
 
-目前總改動量：**7 個檔案，28 行新增，8 行修改**（全部是把陣列包一層或換行）。
+目前總改動量：**8 個檔案，35 行新增，13 行修改**（全部是把陣列或斷言包一層）。
 
 ---
 
-## 七個掛鉤點
+## 八個掛鉤點
 
 | ID | 上游檔案 | 改動 | 我們的模組 |
 |---|---|---|---|
@@ -22,6 +22,7 @@
 | T5 | `src/renderer/src/components/navigation/useTabsConfig.tsx` | 兩個 return 包上 `applyCustomTabs(...)` | `src/renderer/src/custom/tabs.ts` |
 | T6 | `src/renderer/src/routes/schemas/schema.ts` | `...customSettingsSchemas` | `src/renderer/src/custom/settingsSchema.ts` |
 | T7 | `src/renderer/src/routes/schemas/generalSchema.ts` | 語言選項包上 `applyCustomLanguages(...)` | `src/renderer/src/custom/languages.ts` |
+| T8 | `src/renderer/src/routes/schemas/__tests__/generalSchema.test.ts` | 語言選項斷言改為 `expect.arrayContaining([...])` | 同上 |
 
 ### 為什麼這七處無法避免
 
@@ -30,6 +31,7 @@
 - **T5** 上游的 `useTabsConfig` 用硬編碼陣列決定導覽列，沒有註冊 API。
 - **T6** 上游的 `settingsSchema.children` 是靜態陣列。
 - **T7** 語言選項是寫死在 `generalSchema` 裡的陣列字面值。
+- **T8** 上游測試用 `toEqual([...4 個語系])` 精確斷言語言清單，新增語系必然使其失敗。改成 `arrayContaining` 之後上游的四個語系仍被完整檢查，而我們日後再加語系不需要再動這支檔案。
 
 ---
 
@@ -65,12 +67,14 @@
 ## 合併上游後的檢查流程
 
 ```bash
-bash custom/scripts/check-touchpoints.sh   # 七個掛鉤點是否還在
+bash custom/scripts/check-touchpoints.sh   # 八個掛鉤點是否還在
 pnpm typecheck                             # 型別是否還通
 pnpm test                                  # 行為是否還對
 ```
 
 三項都綠才算合併完成。
+
+合併後若 `locales.test.ts` 因為「以下 key 需要補繁中翻譯」而紅，那不是壞掉，是上游新增了字串。補進 `src/renderer/src/custom/locales/zh-TW.json` 即可。
 
 若 `check-touchpoints.sh` 報 FAIL，代表上游把該處重構掉了。**不要只是把程式碼塞回去**，先看上游改成什麼樣子：
 

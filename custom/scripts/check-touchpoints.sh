@@ -39,6 +39,7 @@ need T4 src/renderer/src/routes/appRoutes.tsx                    '.concat(custom
 need T5 src/renderer/src/components/navigation/useTabsConfig.tsx 'applyCustomTabs('
 need T6 src/renderer/src/routes/schemas/schema.ts                '...customSettingsSchemas'
 need T7 src/renderer/src/routes/schemas/generalSchema.ts         'applyCustomLanguages('
+need T8 src/renderer/src/routes/schemas/__tests__/generalSchema.test.ts 'expect.arrayContaining(['
 
 echo ""
 echo "客製化模組："
