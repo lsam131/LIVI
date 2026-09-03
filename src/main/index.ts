@@ -8,6 +8,7 @@ import { setupLifecycle } from '@main/app/lifecycle'
 installMainProcessErrorHandlers()
 
 import { setDebugLogging } from '@main/constants'
+import { registerCustomMain } from '@main/custom'
 import { registerIpc } from '@main/ipc'
 import { configEvents, saveSettings } from '@main/ipc/utils'
 import {
@@ -122,6 +123,7 @@ app.whenReady().then(async () => {
   setupAppIdentity()
   registerAppProtocol()
   registerIpc(runtimeState, services)
+  registerCustomMain() // 客製化掛鉤點 T1：詳見 custom/UPSTREAM_TOUCHPOINTS.md
   createMainWindow(runtimeState, services)
   setupSecondaryWindows(runtimeState)
 

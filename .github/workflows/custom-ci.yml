@@ -1,0 +1,29 @@
+# 客製化專屬 CI。
+#
+# 刻意獨立成一支新檔案，不去改上游的 typecheck.yml 與 build.yml：新增的檔案
+# 在合併上游時永遠不會產生衝突，改上游的檔案則每次都可能要解。
+#
+# 上游的 typecheck.yml 觸發條件是 push 到任何分支（branches: ['**']），
+# 已經涵蓋 lint、typecheck 與完整測試，這裡不重複跑，只補它沒有的東西。
+name: custom-ci
+
+on:
+  push:
+    branches: ['custom/**', 'feat/**', 'sync/**']
+  pull_request:
+    branches: ['custom/**']
+
+jobs:
+  touchpoints:
+    name: 上游掛鉤點
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      # 上游若把某個掛鉤點重構掉，程式仍然編譯得過但客製化功能會靜默消失。
+      # 這一步讓那種情況直接變成紅燈。
+      - name: 驗證七個掛鉤點都還在
+        run: bash custom/scripts/check-touchpoints.sh

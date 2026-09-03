@@ -11,6 +11,7 @@ import { Camera } from '../../components/pages/settings/pages/camera'
 import { GpsHwInfo } from '../../components/pages/settings/pages/general/gps/GpsHwInfo'
 import { GpsInfo } from '../../components/pages/settings/pages/general/gps/GpsInfo'
 import { USBDongle } from '../../components/pages/settings/pages/system/usbDongle/USBDongle'
+import { applyCustomLanguages } from '../../custom/languages'
 import { SelectOption, SettingsNode } from '../types'
 
 const panelDefaultOption: SelectOption = {
@@ -988,12 +989,13 @@ export const generalSchema: SettingsNode<Config> = {
       icon: 'language',
       path: 'language',
       displayValue: true,
-      options: [
+      // 客製化掛鉤點 T7
+      options: applyCustomLanguages([
         { label: 'English', labelKey: 'settings.english', value: 'en' },
         { label: 'German', labelKey: 'settings.german', value: 'de' },
         { label: 'Ukrainian', labelKey: 'settings.ukrainian', value: 'ua' },
         { label: 'French', labelKey: 'settings.french', value: 'fr' }
-      ],
+      ]),
       page: {
         title: 'Language',
         labelTitle: 'settings.language'

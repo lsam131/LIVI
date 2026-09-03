@@ -1,6 +1,7 @@
 import type { Config, TransportSnapshot } from '@shared/types'
 import type { MultiTouchPoint } from '@shared/types/TouchTypes'
 import { contextBridge, IpcRendererEvent, ipcRenderer } from 'electron'
+import { exposeCustomApi } from './custom'
 
 type ApiCallback<TArgs extends unknown[] = unknown[]> = (
   event: IpcRendererEvent,
@@ -297,3 +298,5 @@ const appApi = {
 }
 
 contextBridge.exposeInMainWorld('app', appApi)
+
+exposeCustomApi() // 客製化掛鉤點 T2

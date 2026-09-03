@@ -9,6 +9,7 @@ import { useTheme } from '@mui/material/styles'
 import { ROUTES } from '@shared/types'
 import { useEffect, useState } from 'react'
 import { UI } from '../../constants'
+import { applyCustomTabs } from '../../custom/tabs'
 import { useLiviStore, useProjectionActive, useStatusStore } from '../../store/store'
 import { getWindowRole } from '../../utils/windowRole'
 import { TabConfig } from './types'
@@ -77,7 +78,7 @@ export const useTabsConfig: (receivingVideo: boolean) => TabConfig[] = (receivin
 
   // Secondary windows only show tabs that are routed to that role
   if (role !== 'main') {
-    return [
+    return applyCustomTabs([
       ...(telemetryOnRole
         ? [
             {
@@ -114,10 +115,10 @@ export const useTabsConfig: (receivingVideo: boolean) => TabConfig[] = (receivin
             }
           ]
         : [])
-    ]
+    ]) // 客製化掛鉤點 T5
   }
 
-  return [
+  return applyCustomTabs([
     {
       label: 'Projection',
       path: ROUTES.HOME,
@@ -187,5 +188,5 @@ export const useTabsConfig: (receivingVideo: boolean) => TabConfig[] = (receivin
       path: ROUTES.SETTINGS,
       icon: <SettingsOutlinedIcon sx={{ fontSize: iconFontSize }} />
     }
-  ]
+  ]) // 客製化掛鉤點 T5
 }
