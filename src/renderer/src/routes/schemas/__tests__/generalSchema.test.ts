@@ -282,11 +282,15 @@ describe('generalSchema', () => {
         displayValue: true
       })
     )
-    expect(schema.children[8].options).toEqual([
-      { label: 'English', labelKey: 'settings.english', value: 'en' },
-      { label: 'German', labelKey: 'settings.german', value: 'de' },
-      { label: 'Ukrainian', labelKey: 'settings.ukrainian', value: 'ua' },
-      { label: 'French', labelKey: 'settings.french', value: 'fr' }
-    ])
+    // 客製化掛鉤點 T8：改為 arrayContaining，讓 applyCustomLanguages() 附加的語系
+    // 不會弄壞這個斷言。上游的四個語系仍然被完整檢查。
+    expect(schema.children[8].options).toEqual(
+      expect.arrayContaining([
+        { label: 'English', labelKey: 'settings.english', value: 'en' },
+        { label: 'German', labelKey: 'settings.german', value: 'de' },
+        { label: 'Ukrainian', labelKey: 'settings.ukrainian', value: 'ua' },
+        { label: 'French', labelKey: 'settings.french', value: 'fr' }
+      ])
+    )
   })
 })

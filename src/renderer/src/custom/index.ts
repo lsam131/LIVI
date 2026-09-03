@@ -1,8 +1,35 @@
-import i18n from '../i18n'
+import i18n from 'i18next'
+import zhTW from './locales/zh-TW.json'
 import './theme/overrides.css'
 
 /** 語系代碼 -> 翻譯字典。與 CUSTOM_LANGUAGES 必須成對維護。 */
-export const CUSTOM_LOCALE_BUNDLES: Record<string, Record<string, unknown>> = {}
+export const CUSTOM_LOCALE_BUNDLES: Record<string, Record<string, unknown>> = {
+  'zh-TW': zhTW
+}
+
+/**
+ * 讓 i18next 接受我們新增的語系。
+ *
+ * 上游 i18n.ts 的 `supportedLngs` 是寫死的白名單，不在名單上的語言 changeLanguage()
+ * 會被擋掉並退回 en。我們不去改那支檔案，改在執行期擴充白名單。
+ *
+ * 關鍵細節（實測得出，不是推測）：上游同時開了 `nonExplicitSupportedLngs: true`，
+ * i18next 的 isSupportedCode() 會先把 'zh-TW' 截成語言主碼 'zh' 再比對白名單。
+ * 只推入 'zh-TW' 不會生效，必須連 'zh' 一起推。
+ *
+ * LanguageUtils 在 init 時就捕獲了這個陣列的參照，所以推入同一個陣列即可生效。
+ */
+function allowCustomLanguages(): void {
+  const supported = i18n.options.supportedLngs
+  // false 或 undefined 代表沒有白名單，那就不需要做任何事。
+  if (!Array.isArray(supported)) return
+
+  for (const code of Object.keys(CUSTOM_LOCALE_BUNDLES)) {
+    for (const variant of [code, code.split('-')[0]]) {
+      if (!supported.includes(variant)) supported.push(variant)
+    }
+  }
+}
 
 /** 把客製化語系注入既有的 i18next 實例，不需要改上游的 i18n.ts。 */
 function registerCustomLocales(): void {
@@ -14,28 +41,47 @@ function registerCustomLocales(): void {
 }
 
 /**
+ * 直接操作 i18next singleton，而不是匯入上游的 './i18n' 模組。
+ *
+ * 兩個理由：一是我們要的就是那個 singleton 實例，上游的 i18n.ts 只是對它做 init；
+ * 二是上游測試把 '../i18n' mock 成空物件，若我們依賴它的 default export 會讓
+ * 上游的 main.test.tsx 整組壞掉，那是我們的耦合問題，不該要求上游改測試。
+ *
+ * 因此也必須檢查 isInitialized：i18n.ts 被 mock 掉時 i18next 沒有 init，
+ * addResourceBundle() 會因為 services 未建立而拋錯。
+ */
+function setupI18n(): void {
+  if (!i18n.isInitialized) return
+  allowCustomLanguages()
+  registerCustomLocales()
+}
+
+/**
  * 把 custom.json 的 uiProfile 寫進 <html data-profile>，
  * overrides.css 的所有規則都以它為作用域。
  */
 async function applyUiProfile(): Promise<void> {
-  try {
-    const cfg = await window.custom?.config?.get?.()
-    const profile = cfg?.uiProfile ?? ''
-    if (profile) document.documentElement.dataset.profile = profile
-    else delete document.documentElement.dataset.profile
-  } catch (e) {
-    // 取不到設定不該擋住整個 UI 起動，維持未套用 profile 的預設外觀即可。
-    console.warn('[custom] 讀取 custom.json 失敗，維持預設版面:', (e as Error).message)
-  }
+  const cfg = await window.custom?.config?.get?.()
+  const profile = cfg?.uiProfile ?? ''
+  if (profile) document.documentElement.dataset.profile = profile
+  else delete document.documentElement.dataset.profile
 }
 
 /**
  * 客製化 renderer 的唯一進入點（掛鉤點 T3）。
  *
- * 同步做完不會失敗的部分（注入語系、載入 CSS），需要 IPC 的部分非同步進行，
- * 避免延後首次繪製。
+ * 這個函式在上游 main.tsx 的模組頂層被呼叫，一旦拋錯會讓整個 UI 啟動失敗，
+ * 所以每一段都包在 try/catch 裡：客製化功能失效可以接受，主程式起不來不行。
  */
 export function initCustomRenderer(): void {
-  registerCustomLocales()
-  void applyUiProfile()
+  try {
+    setupI18n()
+  } catch (e) {
+    console.warn('[custom] 語系注入失敗，維持上游語系設定:', (e as Error).message)
+  }
+
+  // 需要 IPC，非同步進行，避免延後首次繪製。
+  void applyUiProfile().catch((e: Error) => {
+    console.warn('[custom] 讀取 custom.json 失敗，維持預設版面:', e.message)
+  })
 }
