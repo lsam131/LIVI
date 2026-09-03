@@ -371,6 +371,25 @@ sudo systemctl stop livi-kiosk.service && LIVI_DEBUG_BG=1 LIVI_WLR_DEBUG=1 cage 
 
 ---
 
+## 實測結果（2026-09-03）
+
+| 階段 | 結果 | 備註 |
+|---|---|---|
+| A HDMI 基準 | **PASS** | Debian 13 (trixie) 確認，LIVI 在 HDMI 上正常啟動 |
+| B 複合視訊 | **未測** | 螢幕尚未接上 |
+| C GT911 觸控 | **未測** | 觸控屏尚未接上 |
+| D USB 麥克風 | **PASS** | 裝置名稱 `USB Audio Device` |
+
+對應規格書的風險狀態：
+
+- **R1（複合視訊）**：基準已成立（LIVI 跑得起來），但 composite 本身仍未驗證。Stage B 是整個顯示方案的決定性測試。
+- **R3（GT911）**：仍未驗證。
+- **R8（USB 麥克風）**：**已關閉**，不需要額外處理。
+
+Stage A 的 `wlr-randr` 輸出未取得，不影響後續，因為設計基準取決於 Stage B 的實際模式。
+
+---
+
 ## 結果回報表
 
 做完把這張表填一填給我，我據此決定 Phase 2 的設計基準：

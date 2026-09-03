@@ -5,6 +5,8 @@ import {
   customConfigPath,
   DEFAULT_CUSTOM_CONFIG,
   loadCustomConfig,
+  OVERSCAN_MAX,
+  OVERSCAN_MIN,
   saveCustomConfig
 } from '@main/custom/config/customConfig'
 
@@ -54,7 +56,38 @@ describe('loadCustomConfig', () => {
 
   test('未知欄位被丟棄', () => {
     writeFileSync(file, JSON.stringify({ uiProfile: 'x', 上游沒有的欄位: true }))
-    expect(loadCustomConfig(file)).toEqual({ uiProfile: 'x' })
+    expect(loadCustomConfig(file)).toEqual({ uiProfile: 'x', overscanPercent: 0 })
+  })
+})
+
+describe('overscanPercent', () => {
+  test('預設為 0（不內縮）', () => {
+    expect(loadCustomConfig(file).overscanPercent).toBe(0)
+  })
+
+  test('讀得到已寫入的值', () => {
+    writeFileSync(file, JSON.stringify({ overscanPercent: 6 }))
+    expect(loadCustomConfig(file).overscanPercent).toBe(6)
+  })
+
+  test('超出上限的值被夾回 OVERSCAN_MAX', () => {
+    // 手動改壞 custom.json 不該讓版面整個爆掉
+    writeFileSync(file, JSON.stringify({ overscanPercent: 90 }))
+    expect(loadCustomConfig(file).overscanPercent).toBe(OVERSCAN_MAX)
+  })
+
+  test('負值被夾回 OVERSCAN_MIN', () => {
+    writeFileSync(file, JSON.stringify({ overscanPercent: -5 }))
+    expect(loadCustomConfig(file).overscanPercent).toBe(OVERSCAN_MIN)
+  })
+
+  test('非數字退回預設值', () => {
+    writeFileSync(file, JSON.stringify({ overscanPercent: '六趴' }))
+    expect(loadCustomConfig(file).overscanPercent).toBe(0)
+  })
+
+  test('寫入時同樣會夾值', () => {
+    expect(saveCustomConfig({ overscanPercent: 999 }, file).overscanPercent).toBe(OVERSCAN_MAX)
   })
 })
 
@@ -65,7 +98,10 @@ describe('saveCustomConfig', () => {
   })
 
   test('回傳寫入後的完整設定', () => {
-    expect(saveCustomConfig({ uiProfile: 'a' }, file)).toEqual({ uiProfile: 'a' })
+    expect(saveCustomConfig({ uiProfile: 'a' }, file)).toEqual({
+      uiProfile: 'a',
+      overscanPercent: 0
+    })
   })
 
   test('patch 是合併而非取代', () => {
@@ -76,6 +112,9 @@ describe('saveCustomConfig', () => {
 
   test('寫入失敗不丟例外，仍回傳合併後的值', () => {
     const bad = join(dir, '不存在的目錄', 'custom.json')
-    expect(saveCustomConfig({ uiProfile: 'x' }, bad)).toEqual({ uiProfile: 'x' })
+    expect(saveCustomConfig({ uiProfile: 'x' }, bad)).toEqual({
+      uiProfile: 'x',
+      overscanPercent: 0
+    })
   })
 })

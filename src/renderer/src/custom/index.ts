@@ -57,14 +57,22 @@ function setupI18n(): void {
 }
 
 /**
- * 把 custom.json 的 uiProfile 寫進 <html data-profile>，
- * overrides.css 的所有規則都以它為作用域。
+ * 把 custom.json 套到 <html> 上。
+ *
+ * uiProfile 決定 data-profile，overrides.css 的所有規則都以它為作用域；
+ * overscanPercent 以 CSS 變數傳進去，這樣實機量測完只要改 custom.json
+ * 一個數字就能校正安全邊距，不必動程式碼也不必重新建置。
  */
 async function applyUiProfile(): Promise<void> {
   const cfg = await window.custom?.config?.get?.()
+  const root = document.documentElement
+
   const profile = cfg?.uiProfile ?? ''
-  if (profile) document.documentElement.dataset.profile = profile
-  else delete document.documentElement.dataset.profile
+  if (profile) root.dataset.profile = profile
+  else delete root.dataset.profile
+
+  const overscan = cfg?.overscanPercent ?? 0
+  root.style.setProperty('--composite-overscan', String(overscan))
 }
 
 /**

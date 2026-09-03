@@ -14,10 +14,26 @@ import { app } from 'electron'
 export type CustomConfig = {
   /** 版面設定檔，會寫進 <html data-profile>。空字串代表不套用任何覆寫。 */
   uiProfile: string
+  /**
+   * 面板四周被吃掉的比例（百分比）。CRT 式與車用複合視訊面板的邊緣通常看不到，
+   * UI 要往內縮這麼多才不會被切掉。實機量測後填入，0 代表不內縮。
+   */
+  overscanPercent: number
 }
 
 export const DEFAULT_CUSTOM_CONFIG: CustomConfig = {
-  uiProfile: ''
+  uiProfile: '',
+  overscanPercent: 0
+}
+
+/** overscanPercent 的合理範圍，超出的值會被夾回來。 */
+export const OVERSCAN_MIN = 0
+export const OVERSCAN_MAX = 15
+
+/** 夾回合理範圍。手動改壞 custom.json 不該讓版面整個爆掉。 */
+function clampOverscan(v: number): number {
+  if (!Number.isFinite(v)) return DEFAULT_CUSTOM_CONFIG.overscanPercent
+  return Math.min(OVERSCAN_MAX, Math.max(OVERSCAN_MIN, v))
 }
 
 /** 測試可注入替代路徑；正式執行時走 Electron 的 userData。 */
@@ -33,7 +49,8 @@ export function loadCustomConfig(file: string = customConfigPath()): CustomConfi
   if (!existsSync(file)) return { ...DEFAULT_CUSTOM_CONFIG }
   try {
     const raw = JSON.parse(readFileSync(file, 'utf8'))
-    return validate(raw, DEFAULT_CUSTOM_CONFIG)
+    const cfg = validate(raw, DEFAULT_CUSTOM_CONFIG)
+    return { ...cfg, overscanPercent: clampOverscan(cfg.overscanPercent) }
   } catch (e) {
     console.warn(`[custom-config] ${file} 讀取失敗，改用預設值:`, (e as Error).message)
     return { ...DEFAULT_CUSTOM_CONFIG }
@@ -45,7 +62,8 @@ export function saveCustomConfig(
   patch: Partial<CustomConfig>,
   file: string = customConfigPath()
 ): CustomConfig {
-  const next = validate({ ...loadCustomConfig(file), ...patch }, DEFAULT_CUSTOM_CONFIG)
+  const merged = validate({ ...loadCustomConfig(file), ...patch }, DEFAULT_CUSTOM_CONFIG)
+  const next = { ...merged, overscanPercent: clampOverscan(merged.overscanPercent) }
   try {
     writeFileAtomic(file, `${JSON.stringify(next, null, 2)}\n`)
   } catch (e) {

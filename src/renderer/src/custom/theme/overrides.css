@@ -7,6 +7,64 @@
  *
  * 這樣做的用意是避免去改上游的 index.html、AppLayout.tsx 與 theme.ts，
  * 那三支是版面相關但改動衝突率最高的檔案。
- *
- * 骨架階段沒有任何規則；Phase 2 的 720x480 版面會加在這裡。
  */
+
+/* ─────────────────────────────────────────────────────────────
+ * composite-480：7 吋 480×234 車用面板，複合視訊 NTSC 輸入
+ *
+ * 面板吃 720×480 的 NTSC 訊號，壓到自己的 480×234 實體像素上：
+ * 水平 0.667×、垂直 0.487×。兩軸不一致會把方形的漢字拉寬 1.37 倍。
+ *
+ * 解法是預補償：內容只用 720×351 的邏輯空間排版，再垂直拉伸 1.3675 倍
+ * 填滿 720×480 畫布。面板壓縮後兩軸淨縮放同為 0.667，漢字回復方正。
+ *
+ *   邏輯 720×351 --(scaleY 1.3675)--> 畫布 720×480 --(面板)--> 480×234
+ *   水平 720 → 480 = 0.667    垂直 351 → 234 = 0.667
+ *
+ * 字級刻意不在這裡處理，改用 config.json 的 uiZoomPercent 統一放大
+ * （見 custom/pi/PI-REQUIREMENTS.md）。理由是 MUI 每個元件都用 emotion
+ * 自帶字級，在 CSS 裡逐個覆寫是打地鼠，而 setZoomFactor() 一次等比放大全部。
+ * ───────────────────────────────────────────────────────────── */
+
+html[data-profile="composite-480"] {
+  /* 720×480 畫布 ÷ 720×351 邏輯空間 */
+  --composite-precomp: 1.3675;
+  /* 安全邊距百分比，由 initCustomRenderer 依 custom.json 的 overscanPercent 覆寫 */
+  --composite-overscan: 0;
+}
+
+/*
+ * height 的 !important 是必要的：AppLayout 用行內樣式設 height: 100dvh，
+ * 而行內樣式贏過任何一般的樣式表規則。作者層的 !important 才蓋得過它。
+ *
+ * 替代方案是改 AppLayout.tsx，但那是上游改動頻繁的版面檔，
+ * UPSTREAM_TOUCHPOINTS.md 明列為刻意不碰的對象。用一個 !important
+ * 換掉一個高衝突的掛鉤點，划算。
+ */
+html[data-profile="composite-480"] #main {
+  box-sizing: border-box;
+  /* 邏輯高度，拉伸後正好填滿視窗 */
+  height: calc(100dvh / var(--composite-precomp)) !important;
+  transform: scaleY(var(--composite-precomp));
+  transform-origin: top left;
+  /* CRT 式面板四周會吃掉邊緣，把 UI 往內縮。垂直方向的百分比要除以
+     拉伸倍率，否則縮進去的量會被放大 */
+  padding-inline: calc(var(--composite-overscan) * 1vw);
+  padding-block: calc(var(--composite-overscan) * 1vh / var(--composite-precomp));
+}
+
+/*
+ * 投影視訊要抵銷掉上面的拉伸。
+ *
+ * 實機上 CarPlay/AA 的畫面是 livi-compositor 畫在透明視窗後面的 GPU plane，
+ * DOM 裡的 #videoContainer 只是個透明的洞，它的 getBoundingClientRect()
+ * 被 useProjectionTouch 用來換算觸控座標。若它跟著被拉伸，觸控點就會對不上
+ * 實際的視訊位置。視訊本身的長寬比是靠 config.json 的 projectionWidth /
+ * projectionHeight 與 projectionViewArea* 處理，不歸 CSS 管。
+ */
+html[data-profile="composite-480"] #videoContainer {
+  /* 同樣要蓋過 Projection.tsx 的行內 height: 100% */
+  height: calc(100% * var(--composite-precomp)) !important;
+  transform: scaleY(calc(1 / var(--composite-precomp)));
+  transform-origin: top left;
+}
