@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ----------------------------------------
-# LIVI Installer & Shortcut Creator (desktop session)
-# ----------------------------------------
-# For a host that already has a desktop session, so it adds an autostart entry,
-# a desktop shortcut and an application entry. Everything it shares with the
-# headless installer lives in scripts/install/common.sh.
-#
-# Re-runnable.
+# For a host with a desktop session. Re-runnable.
 
 LIVI_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../common.sh"
 if [ ! -f "$LIVI_LIB" ]; then
@@ -27,15 +20,13 @@ APPIMAGE_DIR="$(dirname "$APPIMAGE_PATH")"
 echo "→ Creating target directory: $APPIMAGE_DIR"
 mkdir -p "$APPIMAGE_DIR"
 
-echo "→ Checking for required tools: curl, xdg-user-dir, pkexec"
-for tool in curl xdg-user-dir pkexec; do
+echo "→ Checking for required tools: curl, xdg-user-dir"
+for tool in curl xdg-user-dir; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "   $tool not found, installing…"
-    sudo apt-get update
     case "$tool" in
-      xdg-user-dir) sudo apt-get --yes install xdg-user-dirs ;;
-      pkexec)       sudo apt-get --yes install pkexec ;;
-      *)            sudo apt-get --yes install "$tool" ;;
+      xdg-user-dir) livi_pm_install xdg-user-dirs ;;
+      *)            livi_pm_install "$tool" ;;
     esac
   else
     echo "   $tool found"
@@ -44,8 +35,7 @@ done
 
 # A desktop session is already present, so only the core packages are needed here.
 echo "→ Ensuring GStreamer, wireless AP and Bluetooth runtime packages"
-sudo apt-get update
-sudo apt-get install -y $(livi_packages core | tr '\n' ' ')
+livi_pm_install $(livi_packages core | tr '\n' ' ')
 
 ICON_URL="$LIVI_RAW/assets/icons/linux/livi.png"
 ICON_DEST="$USER_HOME/.local/share/icons/livi.png"
@@ -75,7 +65,6 @@ livi_fetch_appimage "$APPIMAGE_PATH" "$APPIMAGE_SRC"
 echo "   Download complete: $APPIMAGE_PATH"
 
 # Everything privileged is granted here, while the installer already holds sudo.
-# The app keeps its pkexec dialogs as a fallback and skips them once these exist.
 LIVI_EXTRACT_DIR="$(mktemp -d)"
 trap "rm -rf '$LIVI_EXTRACT_DIR'" EXIT
 
@@ -93,10 +82,10 @@ TOUCH_FILTER="$(livi_fetch_template "$APPIMAGE_PATH" "$LIVI_TOUCH_FILTER_TEMPLAT
   exit 1
 }
 
-# --- shared ---
 livi_install_touch_filter "$TOUCH_FILTER"
 livi_write_udev_rule "$UDEV_TEMPLATE"
 livi_write_sudoers "$SUDOERS_TEMPLATE"
+livi_write_regdom
 livi_install_time_helper
 livi_disable_wifi_powersave
 livi_set_wifi_pmf_optional
@@ -105,14 +94,10 @@ livi_apply_mfi
 livi_apply_splash
 livi_apply_hdmi_pr "$APPIMAGE_PATH"
 
-# --- desktop only ---
-livi_install_gvfs_guard
-
 echo "→ Creating autostart entry"
 AUTOSTART_DIR="$USER_HOME/.config/autostart"
 mkdir -p "$AUTOSTART_DIR"
 
-# No shell log redirect: the app writes its own rotating logs to userData/log/.
 cat > "$AUTOSTART_DIR/LIVI.desktop" <<EOF
 [Desktop Entry]
 Type=Application

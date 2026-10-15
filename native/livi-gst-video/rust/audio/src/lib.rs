@@ -351,13 +351,12 @@ mod wire {
     }
 }
 
-#[cfg(target_os = "linux")]
 pub mod receiver {
     use super::AudioStream;
     use socket2::{Domain, Protocol, Socket, Type};
     use std::net::UdpSocket;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::JoinHandle;
     use std::time::Duration;
 
@@ -365,10 +364,8 @@ pub mod receiver {
     /// A receive blocks at most this long, so the thread notices shutdown.
     const POLL: Duration = Duration::from_millis(200);
 
-    /// The two UDP ports one audio stream is set up with. The phone sends RTP to
-    /// the data port and RTCP to the control port. Each is read on its own
-    /// thread, so a packet reaches the appsrc without waiting behind the main
-    /// loop.
+    /// The two UDP ports one audio stream is set up with: RTP on the data port, RTCP on
+    /// the control port, each read on its own thread.
     pub struct AudioReceiver {
         stop: Arc<AtomicBool>,
         threads: Vec<JoinHandle<()>>,
@@ -396,8 +393,8 @@ pub mod receiver {
             let mut threads = Vec::new();
 
             let data_stop = stop.clone();
-            threads.push(
-                std::thread::Builder::new().name("cp-audio-rx".into()).spawn(move || {
+            threads.push(std::thread::Builder::new().name("cp-audio-rx".into()).spawn(
+                move || {
                     set_realtime();
                     let mut stream = stream;
                     let mut buf = [0u8; DATAGRAM];
@@ -406,18 +403,18 @@ pub mod receiver {
                             stream.push(&buf[..n]);
                         }
                     }
-                })?,
-            );
+                },
+            )?);
 
             let control_stop = stop.clone();
-            threads.push(
-                std::thread::Builder::new().name("cp-audio-rtcp".into()).spawn(move || {
+            threads.push(std::thread::Builder::new().name("cp-audio-rtcp".into()).spawn(
+                move || {
                     let mut buf = [0u8; DATAGRAM];
                     while !control_stop.load(Ordering::Relaxed) {
                         let _ = control.recv(&mut buf);
                     }
-                })?,
-            );
+                },
+            )?);
 
             Ok((Self { stop, threads }, data_port, control_port))
         }
@@ -432,12 +429,13 @@ pub mod receiver {
         }
     }
 
-    /// Best-effort real-time scheduling so foreign processes cannot preempt the
-    /// receive. Needs an rtprio limit or CAP_SYS_NICE; warns and stays at normal
-    /// priority otherwise.
+    /// Requests SCHED_FIFO for this thread; warns and stays at normal priority when refused.
     fn set_realtime() {
-        let param = libc::sched_param { sched_priority: 20 };
-        let rc = unsafe { libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) };
+        // zeroed, not a struct literal: sched_param carries private padding on some platforms
+        let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
+        param.sched_priority = 10;
+        let rc =
+            unsafe { libc::pthread_setschedparam(libc::pthread_self(), libc::SCHED_FIFO, &param) };
         if rc != 0 {
             eprintln!("[cp_audio_rx] real-time priority denied (rc={rc}); normal priority");
         }

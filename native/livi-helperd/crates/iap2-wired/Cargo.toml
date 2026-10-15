@@ -4,10 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-
-[target.'cfg(target_os = "linux")'.dependencies]
-iap2-usbmux = { path = "../iap2-usbmux" }
-idevice = { version = "0.1", features = ["pair"] }
+iap2-usbmux.workspace = true
+idevice = { version = "0.1", features = ["pair", "usbmuxd"] }
 plist = "1"
-uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["rt", "sync", "io-util", "time"] }
+uuid = { workspace = true, features = ["v4"] }
+tokio = { workspace = true, features = ["rt", "sync", "io-util", "time", "process"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "test-util"] }

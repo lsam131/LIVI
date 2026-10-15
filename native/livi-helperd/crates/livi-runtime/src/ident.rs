@@ -1,10 +1,13 @@
 use iap2_csm::messages::identification::*;
 
+use crate::vehicle::Fuels;
+
 #[derive(Debug, Clone)]
 pub struct Identity {
     pub name: String,
     pub ssid: String,
     pub bt_mac: [u8; 6],
+    pub fuels: Fuels,
 }
 
 /// Which transport carries this session, which decides the transport components the phone
@@ -20,8 +23,8 @@ fn ids(msgs: &[u16]) -> Vec<u8> {
 }
 
 const SENT: &[u16] = &[
-    0xA101, 0x5703, 0x5000, 0x5002, 0x5200, 0x5203, 0xFFFB, 0xAE00, 0xAE02, 0x4157, 0x4159, 0x4154,
-    0x4156, 0x4301,
+    0xA101, 0x5703, 0x5000, 0x5002, 0x5003, 0x5200, 0x5203, 0xFFFB, 0xAE00, 0xAE02, 0x4157, 0x4159,
+    0x4154, 0x4156, 0x4301,
 ];
 
 const RECEIVED: &[u16] = &[
@@ -82,7 +85,12 @@ pub fn build_identification(
                 id: 0,
                 name: "USBHostTransport".into(),
                 supports_iap2_connection: true,
-                car_play_interface_number: Some(3),
+                car_play_interface_number: Some(
+                    std::env::var("LIVI_CP_USB_IFACE")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(3),
+                ),
                 supports_car_play: true,
             }]
         } else {
@@ -117,7 +125,15 @@ pub fn build_identification(
                 name: id.name.clone(),
                 range: true,
                 outside_temperature: true,
-                range_warning: false,
+                range_warning: true,
+                range_gasoline: id.fuels.gasoline,
+                range_diesel: id.fuels.diesel,
+                range_electric: id.fuels.electric,
+                range_cng: id.fuels.cng,
+                range_warning_gasoline: id.fuels.gasoline,
+                range_warning_diesel: id.fuels.diesel,
+                range_warning_electric: id.fuels.electric,
+                range_warning_cng: id.fuels.cng,
             })
         },
         location_information_component: if dropped("location_information_component") {

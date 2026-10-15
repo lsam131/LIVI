@@ -24,7 +24,7 @@
 | T7 | `src/renderer/src/routes/schemas/generalSchema.ts` | 語言選項包上 `applyCustomLanguages(...)` | `src/renderer/src/custom/languages.ts` |
 | T8 | `src/renderer/src/routes/schemas/__tests__/generalSchema.test.ts` | 語言選項斷言改為 `expect.arrayContaining([...])` | 同上 |
 
-### 為什麼這七處無法避免
+### 為什麼這八處無法避免
 
 - **T1 / T2 / T3** 是三個 process 的進入點。Electron 沒有插件機制，客製化程式碼要被執行就一定得有人呼叫，沒有別的辦法。
 - **T4** 上游的 `appRoutes` 是靜態陣列，沒有註冊 API。
@@ -61,6 +61,7 @@
 5. **CSS 覆寫一律用 `html[data-profile="..."]` 作用域**，沒套用 profile 時等於完全沒有規則。
 6. **語言選項與翻譯字典必須成對新增**，`languages.test.ts` 會驗證這件事。
 7. commit 訊息用 `custom:` 前綴；動到上游檔案時在訊息裡註明 `touchpoint: <ID>`。
+8. **不要依賴上游的內部工具函式。** 重用上游的**公開擴充點**（`registerIpcHandle`、`uiZoomPercent`、i18next 實例）是好事，那些是上游給外部用的介面。但重用內部 helper 是負債：v9.4.0 把 `src/main/config/validateConfig` 與 `shared/utils/atomicWrite` 整個刪掉，我們的 `customConfig.ts` 當場編譯失敗。那兩個函式各只有十幾行，自己留一份就完全不受影響。
 
 ---
 
@@ -81,3 +82,26 @@ pnpm test                                  # 行為是否還對
 - 若上游新增了官方的擴充機制（例如分頁註冊 API），改用官方機制，並把這裡的對應列刪掉，掛鉤點就少一個。
 - 若只是搬了位置，把掛鉤點移到新位置，更新本表的檔案路徑。
 - 若該功能被上游整個移除，評估我們是否還需要它。
+
+---
+
+## 同步紀錄
+
+### v9.4.0（2026-10-15，自 9.0.0 開發版基底）
+
+235 個 commit、2372 個檔案、約 11 萬行增刪。**衝突 5 處，全部落在掛鉤點檔案，`custom/` 目錄零衝突。**
+
+| 檔案 | 衝突原因 | 解法 |
+|---|---|---|
+| `schema.ts` | 上游新增 `carSchema` | 兩邊合併 |
+| `generalSchema.ts` | import 區塊重整 | 取上游 + 加回 `applyCustomLanguages` |
+| `generalSchema.test.ts` | 語言節點索引 8 → 7 | 取上游索引，保留 `arrayContaining` |
+| `main/index.ts` | `registerIpc` / `createMainWindow` 移除 `services` 參數 | 取上游簽名，`registerCustomMain()` 無參數不受影響 |
+| `preload/index.ts` | 整個改為 socket-based `CoreLink` | 取上游 import，加回 `exposeCustomApi` |
+
+上游架構重大變動：**設定處理搬進 Rust 的 `livi-core` 程序**，`src/main/config/` 消失，`config.json` 由 Rust 讀寫，Electron 端透過 socket 溝通。我們的 `custom.json` 本來就獨立，不受影響。
+
+連帶處理：
+- `customConfig.ts` 改為自備 `validateAgainst()` 與 `writeAtomic()`（見開發規則第 8 條）。
+- 繁中語系補 30 個新 key（`carSchema` 的燃料類型、電池、速度與溫度單位、Wi-Fi 連線資訊），刪 23 個上游已移除的 key（devTools 與 dongle IP 相關）。`locales.test.ts` 如設計般抓到這些差異。
+- 工具鏈隨上游升級：pnpm 12.11.2、vitest 5.0.3、vite 8.3.4。

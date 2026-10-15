@@ -10,8 +10,8 @@ LIVI_UDEV_FILE="/etc/udev/rules.d/99-LIVI.rules"
 LIVI_UDEV_TEMPLATE="99-LIVI.rules.template"
 LIVI_TOUCH_FILTER_TEMPLATE="livi-touch-filter"
 LIVI_TOUCH_FILTER_FILE="/usr/local/lib/livi/livi-touch-filter"
-LIVI_SUDOERS_FILE="/etc/sudoers.d/99-LIVI-bt"
-LIVI_SUDOERS_TEMPLATE="99-LIVI-bt.sudoers.template"
+LIVI_SUDOERS_FILE="/etc/sudoers.d/99-LIVI-helper"
+LIVI_SUDOERS_TEMPLATE="99-LIVI-helper.sudoers.template"
 LIVI_BOOT_CONFIG="${LIVI_BOOT_CONFIG:-/boot/firmware/config.txt}"
 
 # I2C for the Apple MFi coprocessor, matching carPlayMfiI2cBus in config.json
@@ -22,6 +22,7 @@ LIVI_MFI_OVERLAY="dtoverlay=i2c-gpio,bus=${LIVI_MFI_I2C_BUS},i2c_gpio_sda=19,i2c
 LIVI_MODULES_LOAD="${LIVI_MODULES_LOAD:-/etc/modules-load.d/livi-i2c.conf}"
 LIVI_NM_POWERSAVE_FILE="/etc/NetworkManager/conf.d/99-LIVI-wifi-powersave.conf"
 LIVI_NM_PMF_FILE="/etc/NetworkManager/conf.d/99-LIVI-wifi-pmf.conf"
+LIVI_REGDOM_FILE="/etc/modprobe.d/livi-regdom.conf"
 LIVI_RTPRIO_FILE="/etc/security/limits.d/99-livi-rtprio.conf"
 
 # Pixel repetition for RGB/VGA panels below HDMI's clock floor
@@ -50,9 +51,24 @@ livi_asset_arch() {
   esac
 }
 
-# Package names for the given sections of packages.txt, the single source the app checks too.
+livi_pm() {
+  if command -v apt-get >/dev/null 2>&1; then echo apt
+  elif command -v dnf >/dev/null 2>&1; then echo dnf
+  fi
+}
+
+livi_pm_install() {
+  [ "$#" -gt 0 ] || return 0
+  case "$(livi_pm)" in
+    apt) sudo apt-get update && sudo apt-get install -y "$@" ;;
+    dnf) sudo dnf install -y "$@" ;;
+    *)   echo "Error: no supported package manager (apt/dnf) found" >&2; return 1 ;;
+  esac
+}
+
+# Package names for the given sections (col 2 apt, col 5 dnf), deduped.
 livi_packages() {
-  local manifest tmp section
+  local manifest tmp section field
   manifest="$LIVI_LIB_DIR/packages.txt"
   if [ ! -f "$manifest" ]; then
     tmp="$(mktemp)"
@@ -60,13 +76,13 @@ livi_packages() {
       || { echo "Error: cannot obtain packages.txt" >&2; return 1; }
     manifest="$tmp"
   fi
+  field=2; [ "$(livi_pm)" = dnf ] && field=5
   for section in "$@"; do
-    grep -E "^${section}\|" "$manifest" | cut -d '|' -f2
-  done
+    grep -E "^${section}\|" "$manifest" | cut -d '|' -f"$field"
+  done | awk 'NF && !seen[$0]++'
 }
 
-# Sets LIVI_CHANNEL and LIVI_RELEASE_API. Skips the prompt when LIVI_CHANNEL is
-# already set or an AppImage was passed in, so unattended runs keep working.
+# Sets LIVI_CHANNEL and LIVI_RELEASE_API.
 livi_pick_channel() {
   local have_src="${1:-}" reply
   LIVI_CHANNEL="$(livi_lower "${LIVI_CHANNEL:-}")"
@@ -135,9 +151,8 @@ livi_fetch_appimage() {
 }
 
 # livi_fetch_template <appimage> <name> -> prints the path to the extracted template.
-# Taken from inside the AppImage so what is installed matches the app on this disk,
-# with the repository copy as the fallback for older releases. Each template gets
-# its own directory because --appimage-extract takes one pattern.
+# Taken from the AppImage so it matches the installed app, else from the repository.
+# One directory per template, since --appimage-extract takes one pattern.
 livi_fetch_template() {
   local appimage="$1" name="$2" dir path
   dir="${LIVI_EXTRACT_DIR:-$(mktemp -d)}/$name.d"
@@ -161,7 +176,7 @@ livi_install_touch_filter() {
 }
 
 # livi_install_root_helper <helper> <sudoers-file> <description>
-# Script body comes from stdin. Grants the user passwordless sudo for that helper.
+# Script body comes from stdin.
 livi_install_root_helper() {
   local helper="$1" rule="$2" desc="$3" staged
   echo "→ Installing $helper"
@@ -188,7 +203,6 @@ SUDOEOF
   fi
 }
 
-# Root helper + sudoers rule so the app can pin its display mode in the kernel cmdline
 livi_install_video_mode_helper() {
   livi_install_root_helper /usr/local/lib/livi/livi-video-mode.sh /etc/sudoers.d/99-LIVI-video \
     "lets $USER pin the display mode in the kernel cmdline." <<'EOF'
@@ -214,28 +228,6 @@ out="$stripped${new:+ $new}"
 EOF
 }
 
-# Lets LIVI hide plugged phones from the desktop file manager while it runs.
-livi_install_gvfs_guard() {
-  livi_install_root_helper /usr/local/lib/livi/gvfs-phone-guard.sh /etc/sudoers.d/99-LIVI-gvfs \
-    "lets $USER toggle the phone gvfs volume monitors." <<'EOF'
-#!/bin/bash
-# Managed by LIVI. Hides or restores the phone gvfs volume monitors.
-set -u
-D=/usr/share/gvfs/remote-volume-monitors
-action="${1:-}"
-for m in afc gphoto2 mtp; do
-  case "$action" in
-    disable) [ -f "$D/$m.monitor" ] && mv "$D/$m.monitor" "$D/$m.livi-off" ;;
-    restore) [ -f "$D/$m.livi-off" ] && mv "$D/$m.livi-off" "$D/$m.monitor" ;;
-    *) echo "usage: gvfs-phone-guard.sh disable|restore" >&2 ; exit 2 ;;
-  esac
-done
-[ "$action" = disable ] && pkill -f "gvfs-afc-volume|gvfs-gphoto2|gvfs-mtp-volume|gvfsd-afc" 2>/dev/null
-exit 0
-EOF
-}
-
-# Powers the host down or reboots it.
 livi_install_power_helper() {
   livi_install_root_helper /usr/local/lib/livi/livi-power.sh /etc/sudoers.d/99-LIVI-power \
     "lets $USER power the host down or reboot it." <<'EOF'
@@ -250,7 +242,6 @@ esac
 EOF
 }
 
-# Sets the system clock and timezone.
 livi_install_time_helper() {
   livi_install_root_helper /usr/local/lib/livi/livi-set-time.sh /etc/sudoers.d/99-LIVI-time \
     "lets $USER set the system clock and timezone." <<'EOF'
@@ -292,8 +283,7 @@ livi_is_raspberry_pi() {
   grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null
 }
 
-# Prints one EDID profile name per line, from the checkout if present,
-# otherwise from the repository.
+# Prints one EDID profile name per line.
 livi_list_display_profiles() {
   local dir="$LIVI_LIB_DIR/../../assets/$LIVI_DISPLAYS_DIR"
   if [ -d "$dir" ]; then
@@ -374,8 +364,6 @@ livi_ask_hdmi_pr() {
   LIVI_HDMI_PR_EDID="$(printf '%s\n' "$profiles" | sed -n "${reply}p")"
 }
 
-# Runs the pixel repetition setup for the chosen panel. Prefers the checkout,
-# otherwise the AppImage, then the repository.
 livi_apply_hdmi_pr() {
   local appimage="$1" script edid
   [ "${LIVI_HDMI_PR:-no}" = "yes" ] || return 0
@@ -399,8 +387,6 @@ livi_apply_hdmi_pr() {
   return 0
 }
 
-# The radio's power saving drops an idle link after a few minutes, which takes the
-# host off the network. Applies from the next boot, so no running session is cut.
 # Grants real-time scheduling to the CarPlay audio receive thread. Kiosk and
 # desktop sessions run through PAM, so pam_limits applies this on login.
 livi_grant_rtprio() {
@@ -409,13 +395,48 @@ livi_grant_rtprio() {
   printf '%s - rtprio 30\n' "$USER" | sudo tee "$LIVI_RTPRIO_FILE" >/dev/null
 }
 
+# The radio's power saving drops an idle link after a few minutes, which takes the
+# host off the network. Applies from the next boot, so no running session is cut.
 livi_disable_wifi_powersave() {
   echo "→ Writing $LIVI_NM_POWERSAVE_FILE"
   sudo mkdir -p "$(dirname "$LIVI_NM_POWERSAVE_FILE")"
   printf '[connection]\nwifi.powersave = 2\n' | sudo tee "$LIVI_NM_POWERSAVE_FILE" >/dev/null
 }
 
-# Sets 802.11w (PMF) to optional for all NetworkManager Wi-Fi connections.
+# The installer edits the app config with jq, the app itself does not need it.
+livi_require_jq() {
+  command -v jq >/dev/null 2>&1 && return 0
+  echo "→ Installing jq"
+  livi_pm_install jq
+}
+
+# livi_app_config_jq <filter> [jq options] -> the filter applied to the app config,
+# which counts as {} when it is missing or not a JSON object.
+livi_app_config_jq() {
+  local filter="$1" src="$LIVI_APP_CONFIG"
+  shift
+  [ -r "$src" ] || src=/dev/null
+  jq -Rs "$@" "(try fromjson catch null) | if type == \"object\" then . else {} end | $filter" "$src"
+}
+
+# livi_app_config_value <key> <default> -> the value from the app config, or the default.
+livi_app_config_value() {
+  livi_app_config_jq '.[$k] | if . == null or . == "" then $d else . end' -r --arg k "$1" --arg d "$2"
+}
+
+# Sets the regulatory domain as the driver loads, so hostapd does not wait for the kernel
+# to fetch it. Only once the user has chosen a country in LIVI.
+livi_write_regdom() {
+  local country
+  livi_require_jq || return 0
+  country="$(livi_app_config_value country '' | tr '[:lower:]' '[:upper:]')"
+  case "$country" in [A-Z][A-Z]) ;; *) return 0 ;; esac
+  echo "→ Writing $LIVI_REGDOM_FILE for $country"
+  sudo mkdir -p "$(dirname "$LIVI_REGDOM_FILE")"
+  printf 'options cfg80211 ieee80211_regdom=%s\n' "$country" | sudo tee "$LIVI_REGDOM_FILE" >/dev/null
+}
+
+# wifi-sec.pmf=2 makes 802.11w (PMF) optional.
 livi_set_wifi_pmf_optional() {
   echo "→ Writing $LIVI_NM_PMF_FILE"
   sudo mkdir -p "$(dirname "$LIVI_NM_PMF_FILE")"
@@ -428,13 +449,12 @@ livi_set_wifi_pmf_optional() {
 livi_write_udev_rule() {
   local template="$1"
   echo "→ Writing $LIVI_UDEV_FILE"
-  sed "s/__USERNAME__/$USER/g" "$template" | sudo tee "$LIVI_UDEV_FILE" >/dev/null
+  sudo tee "$LIVI_UDEV_FILE" <"$template" >/dev/null
   sudo udevadm control --reload-rules
   sudo udevadm trigger
 }
 
-# Lets the helper run as root without a password, which a headless host needs
-# because the in-app pkexec dialog has no agent to display it.
+# LIVI never asks for a password, it reaches everything under root through the helper.
 livi_write_sudoers() {
   local template="$1" staged
   echo "→ Writing $LIVI_SUDOERS_FILE"
@@ -452,8 +472,8 @@ livi_write_sudoers() {
   livi_drop_obsolete_sudoers
 }
 
-# Earlier releases gave each python helper its own drop-in. They grant root to
-# scripts that no longer ship, so drop them once the current rule is in place.
+# Removes the per-script drop-ins of earlier releases once the current rule is in
+# place, they grant root to scripts that no longer ship.
 livi_drop_obsolete_sudoers() {
   local f
   for f in /etc/sudoers.d/99-LIVI-aa /etc/sudoers.d/99-LIVI-cp; do
@@ -462,6 +482,11 @@ livi_drop_obsolete_sudoers() {
       sudo rm -f "$f"
     fi
   done
+  # 99-LIVI-bt granted the same thing under a name that only said Bluetooth.
+  if sudo test -f /etc/sudoers.d/99-LIVI-bt; then
+    echo "→ Removing obsolete /etc/sudoers.d/99-LIVI-bt"
+    sudo rm -f /etc/sudoers.d/99-LIVI-bt
+  fi
   sudo rm -f "$LIVI_SUDOERS_FILE.livi-tmp"
 }
 
@@ -493,7 +518,7 @@ livi_ask_mfi() {
   esac
 }
 
-# LIVI_SPLASH
+# Sets LIVI_SPLASH to yes or no. LIVI_SPLASH skips the prompt.
 livi_ask_splash() {
   local reply
   LIVI_SPLASH="$(livi_lower "${LIVI_SPLASH:-}")"
@@ -521,8 +546,7 @@ livi_ask_splash() {
   esac
 }
 
-# Hands over to scripts/install/pi/splash/install.sh, which needs root and the
-# logo next to it. Prefers the checkout, otherwise fetches both.
+# The splash installer needs the logo next to it.
 livi_apply_splash() {
   [ "${LIVI_SPLASH:-no}" = "yes" ] || return 0
   local dir script
@@ -543,26 +567,18 @@ livi_apply_splash() {
   sudo bash "$script" || echo "   splash install failed, continuing" >&2
 }
 
-# Writes the MFi i2c bus and power pin into the app config. Keeps values the
-# user already set; only a missing or disabled (-1) power pin is filled in.
+# A power pin of -1 means disabled and counts as unset.
 livi_seed_mfi_config() {
-  local python_bin
-  python_bin="$(command -v python3 || echo /usr/bin/python3)"
+  local cfg
+  livi_require_jq || return 1
   mkdir -p "$(dirname "$LIVI_APP_CONFIG")"
-  "$python_bin" - "$LIVI_APP_CONFIG" "$LIVI_MFI_I2C_BUS" "$LIVI_MFI_POWER_GPIO" <<'PY'
-import json, sys
-path, bus, gpio = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-try:
-    with open(path) as f:
-        cfg = json.load(f)
-except (OSError, ValueError):
-    cfg = {}
-cfg.setdefault("carPlayMfiI2cBus", bus)
-if cfg.get("carPlayMfiPowerGpio", -1) in (None, "", -1):
-    cfg["carPlayMfiPowerGpio"] = gpio
-with open(path, "w") as f:
-    json.dump(cfg, f, indent=2)
-PY
+  cfg="$(livi_app_config_jq '
+    (if has("carPlayMfiI2cBus") then . else .carPlayMfiI2cBus = $bus end)
+    | if .carPlayMfiPowerGpio == null or .carPlayMfiPowerGpio == "" or .carPlayMfiPowerGpio == -1
+      then .carPlayMfiPowerGpio = $gpio else . end' \
+    --argjson bus "$LIVI_MFI_I2C_BUS" --argjson gpio "$LIVI_MFI_POWER_GPIO")" || return 1
+  [ -n "$cfg" ] || return 1
+  printf '%s\n' "$cfg" > "$LIVI_APP_CONFIG"
 }
 
 livi_apply_mfi() {

@@ -6,16 +6,12 @@ let mockNode: any = null
 let mockSplat: string | undefined = 'audio'
 const handleFieldChange = vi.fn()
 const restartMock = vi.fn()
-const applyBtList = vi.fn()
 
 const statusState = {
-  isDongleHardwarePresent: true,
-  activeProtocol: null as 'carplay' | 'androidauto' | 'dongle' | null
+  sessionsOpen: true
 }
 const liviState = {
-  settings: { some: 'settings', wirelessAaEnabled: false } as Record<string, unknown>,
-  bluetoothPairedDirty: false,
-  applyBluetoothPairedList: applyBtList
+  settings: { some: 'settings', wirelessAaEnabled: false } as Record<string, unknown>
 }
 const smartState = {
   state: { audio: { mute: false } } as unknown,
@@ -37,8 +33,7 @@ vi.mock('react-i18next', () => ({
 vi.mock('@store/store', () => ({
   useStatusStore: (selector: (s: any) => unknown) => selector(statusState),
   useLiviStore: (selector: (s: any) => unknown) => selector(liviState),
-  useProjectionActive: () =>
-    statusState.isDongleHardwarePresent || statusState.activeProtocol !== null
+  useSessionsOpen: () => statusState.sessionsOpen
 }))
 
 vi.mock('../hooks/useSmartSettingsFromSchema', () => ({
@@ -122,12 +117,9 @@ describe('SettingsPage', () => {
     mockSplat = 'audio'
     navigateMock.mockReset()
     restartMock.mockReset()
-    applyBtList.mockReset()
     handleFieldChange.mockReset()
-    statusState.isDongleHardwarePresent = true
-    statusState.activeProtocol = null
+    statusState.sessionsOpen = true
     liviState.settings = { some: 'settings', wirelessAaEnabled: false }
-    liviState.bluetoothPairedDirty = false
     smartState.needsRestart = false
   })
 
@@ -225,14 +217,12 @@ describe('SettingsPage', () => {
     expect(handleFieldChange).toHaveBeenCalledWith('cx', 'changed')
   })
 
-  test('handleRestart no-ops when neither dongle nor AA is connected', () => {
-    statusState.isDongleHardwarePresent = false
-    statusState.activeProtocol = null
+  test('handleRestart no-ops with no phone connected', () => {
+    statusState.sessionsOpen = false
     mockNode = { type: 'route', label: 'Audio', children: [] }
     render(<SettingsPage />)
     fireEvent.click(screen.getByTestId('restart'))
     expect(restartMock).not.toHaveBeenCalled()
-    expect(applyBtList).not.toHaveBeenCalled()
   })
 
   test('handleRestart no-ops when restart is available but nothing is pending', () => {
@@ -240,30 +230,9 @@ describe('SettingsPage', () => {
     render(<SettingsPage />)
     fireEvent.click(screen.getByTestId('restart'))
     expect(restartMock).not.toHaveBeenCalled()
-    expect(applyBtList).not.toHaveBeenCalled()
   })
 
   test('handleRestart calls restart() when needsRestart is true', () => {
-    smartState.needsRestart = true
-    mockNode = { type: 'route', label: 'Audio', children: [] }
-    render(<SettingsPage />)
-    fireEvent.click(screen.getByTestId('restart'))
-    expect(restartMock).toHaveBeenCalled()
-    expect(applyBtList).not.toHaveBeenCalled()
-  })
-
-  test('handleRestart applies the BT list when dirty and no restart is pending', () => {
-    liviState.bluetoothPairedDirty = true
-    mockNode = { type: 'route', label: 'Audio', children: [] }
-    render(<SettingsPage />)
-    fireEvent.click(screen.getByTestId('restart'))
-    expect(applyBtList).toHaveBeenCalled()
-    expect(restartMock).not.toHaveBeenCalled()
-  })
-
-  test('AA-active alone is enough to enable restart', () => {
-    statusState.isDongleHardwarePresent = false
-    liviState.settings = { wirelessAaEnabled: true }
     smartState.needsRestart = true
     mockNode = { type: 'route', label: 'Audio', children: [] }
     render(<SettingsPage />)

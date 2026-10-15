@@ -18,8 +18,8 @@ LIVI_GST_DEBUG=1 ./LIVI*.AppImage
   pipeline on Linux. The main process spawns it and talks to it over a unix socket.
 - **livi-compositor** is the nested wlroots compositor on Linux. The main process
   spawns it.
-- **helper** is a Python process that sets up Bluetooth and Wi-Fi for native
-  Android Auto and CarPlay.
+- **helper** is `livi-helperd`, a native binary the main process runs as root. It
+  sets up Bluetooth, Wi-Fi and the access point for native Android Auto and CarPlay.
 
 ## Where the logs go
 
@@ -55,6 +55,13 @@ LIVI_GST_DEBUG=1 ./LIVI*.AppImage
 | `LIVI_WLR_DEBUG=1` | Raise the nested wlroots compositor log level to `WLR_DEBUG`. |
 | `LIVI_DEBUG_BG=1` | Paint a magenta debug background in the compositor, to see the layout and video planes. |
 | `LIVI_NO_COMPOSITOR=1` | Start without the nested compositor. |
+
+### UI
+
+| Flag | Effect |
+| --- | --- |
+| `LIVI_NO_UI=1` | Run livi-core without starting the UI. |
+| `LIVI_UI_CMD=<command>` | Start this shell command as the UI instead. From the repo, `LIVI_UI_CMD="pnpm dev"` runs the UI with hot reload inside the compositor. |
 
 ### CarPlay, Bluetooth and Wi-Fi helper
 

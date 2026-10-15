@@ -1,36 +1,53 @@
 //! Host side: one xdg-shell window of the outer session per open screen, its
 //! EGL surface, and the outer seat's pointer/touch/keyboard routed into our seat.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use calloop_wayland_source::WaylandSource;
+use smithay::backend::drm::DrmDeviceFd;
 use smithay::backend::egl::context::GlAttributes;
 use smithay::backend::egl::native::{EGLNativeDisplay, EGLPlatform};
-use smithay::backend::egl::{EGLContext, EGLDisplay, EGLSurface};
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay, EGLSurface};
 use smithay::backend::renderer::ImportDma;
+use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::reexports::calloop::LoopHandle;
-use smithay::utils::SERIAL_COUNTER;
-use smithay_client_toolkit::compositor::{CompositorHandler as SctkCompositorHandler, CompositorState as SctkCompositorState};
-use smithay_client_toolkit::output::{OutputHandler as SctkOutputHandler, OutputState as SctkOutputState};
-use calloop_wayland_source::WaylandSource;
+use smithay::utils::{DeviceFd, SERIAL_COUNTER};
+use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
+use smithay::wayland::drm_syncobj::{DrmSyncobjState, supports_syncobj_eventfd};
+use smithay_client_toolkit::compositor::{
+    CompositorHandler as SctkCompositorHandler, CompositorState as SctkCompositorState,
+    FrameCallbackData,
+};
+use smithay_client_toolkit::output::{
+    OutputHandler as SctkOutputHandler, OutputState as SctkOutputState,
+};
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_keyboard::WlKeyboard;
-use smithay_client_toolkit::reexports::client::protocol::wl_output::{Transform as CTransform, WlOutput};
+use smithay_client_toolkit::reexports::client::protocol::wl_output::{
+    Transform as CTransform, WlOutput,
+};
 use smithay_client_toolkit::reexports::client::protocol::wl_pointer::WlPointer;
 use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat as CWlSeat;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface as CWlSurface;
 use smithay_client_toolkit::reexports::client::protocol::wl_touch::WlTouch;
 use smithay_client_toolkit::reexports::client::{Connection, Proxy, QueueHandle};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
-use smithay_client_toolkit::seat::keyboard::{KeyboardHandler, KeyEvent, Keysym, Modifiers};
-use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
+use smithay_client_toolkit::seat::keyboard::{
+    KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers,
+};
+use smithay_client_toolkit::seat::pointer::{
+    CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer,
+};
 use smithay_client_toolkit::seat::touch::TouchHandler;
-use smithay_client_toolkit::seat::{Capability, SeatHandler as SctkSeatHandler, SeatState as SctkSeatState};
+use smithay_client_toolkit::seat::{
+    Capability, SeatHandler as SctkSeatHandler, SeatState as SctkSeatState,
+};
+use smithay_client_toolkit::shell::WaylandSurface;
+use smithay_client_toolkit::shell::xdg::XdgShell;
 use smithay_client_toolkit::shell::xdg::window::{
     DecorationMode, Window, WindowConfigure, WindowDecorations, WindowHandler,
 };
-use smithay_client_toolkit::shell::xdg::XdgShell;
-use smithay_client_toolkit::shell::WaylandSurface;
+use smithay_client_toolkit::shm::{Shm, ShmHandler as SctkShmHandler};
 
 use crate::state::LiviState;
 
@@ -61,10 +78,12 @@ pub struct HostState {
     pub pointer_pos: (f64, f64),           // layout coords
     pub pointer_screen: Option<usize>,
     pub keyboard: Option<WlKeyboard>,
-    pub pointer: Option<WlPointer>,
+    pub pointer: Option<ThemedPointer>,
+    pub shm: Option<Shm>,
+    /// What the inner client wants the pointer to look like, None while it hides it.
+    pub cursor: Option<CursorIcon>,
     pub touch: Option<WlTouch>,
     pub has_touch_cap: bool,
-    pub pointer_seen: bool,
     pub last_pointer_serial: u32,
     pub host_seat: Option<CWlSeat>,
     pub touch_positions: Vec<(i32, f64, f64)>,
@@ -91,9 +110,10 @@ impl HostState {
             pointer_screen: None,
             keyboard: None,
             pointer: None,
+            shm: None,
+            cursor: None,
             touch: None,
             has_touch_cap: false,
-            pointer_seen: false,
             last_pointer_serial: 0,
             host_seat: None,
             touch_positions: Vec::new(),
@@ -104,17 +124,11 @@ impl HostState {
     }
 
     pub fn window_for_screen(&mut self, screen_idx: usize) -> Option<&mut HostWindow> {
-        self.windows
-            .iter_mut()
-            .find(|(i, _)| *i == screen_idx)
-            .map(|(_, w)| w)
+        self.windows.iter_mut().find(|(i, _)| *i == screen_idx).map(|(_, w)| w)
     }
 
     pub fn screen_for_surface(&self, surface: &CWlSurface) -> Option<usize> {
-        self.windows
-            .iter()
-            .find(|(_, w)| w.window.wl_surface() == surface)
-            .map(|(i, _)| *i)
+        self.windows.iter().find(|(_, w)| w.window.wl_surface() == surface).map(|(i, _)| *i)
     }
 }
 
@@ -167,6 +181,20 @@ impl EGLNativeDisplay for HostNativeDisplay {
     }
 }
 
+/// The DRM node the renderer runs on.
+fn render_node(display: &EGLDisplay) -> Option<std::path::PathBuf> {
+    let device = EGLDevice::device_for_display(display).ok()?;
+    device.render_device_path().or_else(|_| device.drm_device_path()).ok()
+}
+
+/// The render node, when it can do explicit sync. NVIDIA puts no implicit fences on dmabufs, so
+/// without explicit sync the compositor reads buffers a client is still drawing into.
+fn syncobj_device(path: &std::path::Path) -> Option<DrmDeviceFd> {
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(path).ok()?;
+    let fd = DrmDeviceFd::new(DeviceFd::from(std::os::fd::OwnedFd::from(file)));
+    supports_syncobj_eventfd(&fd).then_some(fd)
+}
+
 /// Connect to the outer session, set up EGL + the shared GLES renderer, and
 /// hook the host event queue into the loop.
 pub fn init(state: &mut LiviState, handle: &LoopHandle<'static, LiviState>) {
@@ -179,43 +207,54 @@ pub fn init(state: &mut LiviState, handle: &LoopHandle<'static, LiviState>) {
     let sctk_seats = SctkSeatState::new(&globals, &qh);
     let sctk_compositor = SctkCompositorState::bind(&globals, &qh).expect("host wl_compositor");
     let xdg_shell = XdgShell::bind(&globals, &qh).expect("host xdg_wm_base");
+    let shm = Shm::bind(&globals, &qh).expect("host wl_shm");
 
     let display_ptr = conn.backend().display_ptr() as *mut std::ffi::c_void;
     let egl_display =
         unsafe { EGLDisplay::new(HostNativeDisplay(display_ptr)) }.expect("EGLDisplay");
     let egl_context = EGLContext::new_with_config(
         &egl_display,
-        GlAttributes {
-            version: (2, 0),
-            profile: None,
-            debug: false,
-            vsync: false,
-        },
+        GlAttributes { version: (2, 0), profile: None, debug: false, vsync: false },
         smithay::backend::egl::context::PixelFormatRequirements::_8_bit(),
     )
     .expect("EGLContext");
-    let renderer = unsafe { GlesRenderer::new(
-        EGLContext::new_shared_with_config(
-            &egl_display,
-            &egl_context,
-            GlAttributes {
-                version: (2, 0),
-                profile: None,
-                debug: false,
-                vsync: false,
-            },
-            smithay::backend::egl::context::PixelFormatRequirements::_8_bit(),
+    let renderer = unsafe {
+        GlesRenderer::new(
+            EGLContext::new_shared_with_config(
+                &egl_display,
+                &egl_context,
+                GlAttributes { version: (2, 0), profile: None, debug: false, vsync: false },
+                smithay::backend::egl::context::PixelFormatRequirements::_8_bit(),
+            )
+            .expect("shared EGLContext"),
         )
-        .expect("shared EGLContext"),
-    ) }
+    }
     .expect("GlesRenderer");
 
-    // Advertise dmabuf to inner clients with the formats the renderer imports.
+    state.render_node = render_node(&egl_display);
+
+    // Advertise dmabuf to inner clients with the formats the renderer imports. The render node as main
+    // device makes them allocate on the GPU this compositor draws with, where there is more than one.
     let formats = renderer.dmabuf_formats();
-    let global = state
-        .dmabuf_state
-        .create_global::<LiviState>(&state.display_handle, formats);
-    let _ = global;
+    let feedback = state.render_node.as_deref().and_then(|node| {
+        let dev = std::os::unix::fs::MetadataExt::rdev(&std::fs::metadata(node).ok()?);
+        DmabufFeedbackBuilder::new(dev, formats.clone()).build().ok()
+    });
+    let _global = match &feedback {
+        Some(feedback) => state
+            .dmabuf_state
+            .create_global_with_default_feedback::<LiviState>(&state.display_handle, feedback),
+        None => state.dmabuf_state.create_global::<LiviState>(&state.display_handle, formats),
+    };
+
+    match state.render_node.as_deref().and_then(syncobj_device) {
+        Some(fd) => {
+            log::info!("explicit sync over {:?}", state.render_node);
+            state.syncobj_state =
+                Some(DrmSyncobjState::new::<LiviState>(&state.display_handle, fd));
+        }
+        None => log::info!("no explicit sync, inner clients rely on implicit dmabuf fences"),
+    }
 
     WaylandSource::new(conn.clone(), event_queue)
         .insert(handle.clone())
@@ -228,6 +267,7 @@ pub fn init(state: &mut LiviState, handle: &LoopHandle<'static, LiviState>) {
     state.host.sctk_seats = Some(sctk_seats);
     state.host.sctk_compositor = Some(sctk_compositor);
     state.host.xdg_shell = Some(xdg_shell);
+    state.host.shm = Some(shm);
     state.host.egl_display = Some(egl_display);
     state.host.egl_context = Some(egl_context);
     state.host.renderer = Some(renderer);
@@ -243,10 +283,12 @@ fn default_size(state: &LiviState, screen_idx: usize) -> (i32, i32) {
     }
     if let Ok(v) = std::env::var("LIVI_OUTPUT_SIZE")
         && let Some((w, h)) = v.split_once('x')
-            && let (Ok(w), Ok(h)) = (w.parse(), h.parse())
-                && w > 0 && h > 0 {
-                    return (w, h);
-                }
+        && let (Ok(w), Ok(h)) = (w.parse(), h.parse())
+        && w > 0
+        && h > 0
+    {
+        return (w, h);
+    }
     (1280, 720)
 }
 
@@ -274,8 +316,8 @@ pub fn open_screen(state: &mut LiviState, screen_idx: usize) {
     }
     window.commit();
 
-    let wl_egl = wayland_egl::WlEglSurface::new(window.wl_surface().id(), w, h)
-        .expect("wl_egl_window");
+    let wl_egl =
+        wayland_egl::WlEglSurface::new(window.wl_surface().id(), w, h).expect("wl_egl_window");
     let egl_surface = unsafe {
         EGLSurface::new(
             egl_display,
@@ -349,18 +391,13 @@ fn ensure_server_output(state: &mut LiviState, screen_idx: usize) {
     );
     let _global = output.create_global::<LiviState>(&state.display_handle);
     output.change_current_state(
-        Some(smithay::output::Mode {
-            size: (s.width, s.height).into(),
-            refresh: 60_000,
-        }),
+        Some(smithay::output::Mode { size: (s.width, s.height).into(), refresh: 60_000 }),
         Some(smithay::utils::Transform::Normal),
         None,
         Some((s.x, 0).into()),
     );
-    output.set_preferred(smithay::output::Mode {
-        size: (s.width, s.height).into(),
-        refresh: 60_000,
-    });
+    output
+        .set_preferred(smithay::output::Mode { size: (s.width, s.height).into(), refresh: 60_000 });
     s.output = Some(output);
 }
 
@@ -383,11 +420,7 @@ pub fn minimize(state: &mut LiviState, screen_idx: usize) {
 
 /// The seat that drives interactive host-side grabs.
 fn grab_seat(state: &LiviState) -> Option<CWlSeat> {
-    state
-        .host
-        .host_seat
-        .clone()
-        .or_else(|| state.host.sctk_seats.as_ref()?.seats().next())
+    state.host.host_seat.clone().or_else(|| state.host.sctk_seats.as_ref()?.seats().next())
 }
 
 pub fn begin_move(state: &mut LiviState, screen_idx: usize) {
@@ -432,23 +465,55 @@ pub fn damage_all(state: &mut LiviState) {
     }
 }
 
-/// Physical millimetres of the host output a screen's window sits on.
+/// Physical millimetres of a screen's window, the share of the host output it covers.
 pub fn panel_mm(state: &LiviState, screen_idx: usize) -> Option<(i32, i32)> {
     let outputs = state.host.sctk_outputs.as_ref()?;
-    let output = state
-        .host
-        .windows
-        .iter()
-        .find(|(i, _)| *i == screen_idx)?
-        .1
-        .host_output
-        .as_ref()?;
+    let output =
+        state.host.windows.iter().find(|(i, _)| *i == screen_idx)?.1.host_output.as_ref()?;
     let info = outputs.info(output)?;
     let (w, h) = info.physical_size;
-    if w > 0 && h > 0 {
-        Some((w, h))
-    } else {
-        None
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    // wl_output reports the panel's unrotated mm and modes; our screen size is post-transform.
+    let turned = matches!(
+        info.transform,
+        CTransform::_90 | CTransform::_270 | CTransform::Flipped90 | CTransform::Flipped270
+    );
+    let mm = if turned { (h, w) } else { (w, h) };
+    let screen = state.screens.get(screen_idx)?;
+    let logical = info.logical_size.filter(|&(w, h)| w > 0 && h > 0).or_else(|| {
+        let (w, h) = info.modes.iter().find(|m| m.current)?.dimensions;
+        let scale = info.scale_factor.max(1);
+        let (w, h) = if turned { (h, w) } else { (w, h) };
+        (w > 0 && h > 0).then_some((w / scale, h / scale))
+    });
+    match logical {
+        Some(output) => Some(share_of_panel(mm, (screen.width, screen.height), output)),
+        None => Some(mm),
+    }
+}
+
+/// The panel's millimetres scaled to the part a window of `window` logical pixels covers.
+fn share_of_panel(mm: (i32, i32), window: (i32, i32), output: (i32, i32)) -> (i32, i32) {
+    let scale =
+        |mm: i32, px: i32, of: i32| ((mm as i64 * px as i64 + of as i64 / 2) / of as i64) as i32;
+    (scale(mm.0, window.0, output.0), scale(mm.1, window.1, output.1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::share_of_panel;
+
+    #[test]
+    fn a_window_gets_the_millimetres_of_the_part_it_covers() {
+        // A 27" panel at 2560x1440 logical, LIVI in a 1280x752 window.
+        assert_eq!(share_of_panel((600, 340), (1280, 752), (2560, 1440)), (300, 178));
+    }
+
+    #[test]
+    fn a_fullscreen_window_keeps_the_whole_panel() {
+        assert_eq!(share_of_panel((600, 340), (2560, 1440), (2560, 1440)), (600, 340));
     }
 }
 
@@ -480,8 +545,22 @@ pub fn pump(state: &mut LiviState) {
 // ── SCTK handler plumbing ────────────────────────────────────────────────────
 
 impl SctkCompositorHandler for LiviState {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &CWlSurface, _: i32) {}
-    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &CWlSurface, _: CTransform) {}
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &CWlSurface,
+        _: i32,
+    ) {
+    }
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &CWlSurface,
+        _: CTransform,
+    ) {
+    }
     fn surface_enter(
         &mut self,
         _: &Connection,
@@ -505,19 +584,21 @@ impl SctkCompositorHandler for LiviState {
         _: &WlOutput,
     ) {
         if let Some(idx) = self.host.screen_for_surface(surface)
-            && let Some(w) = self.host.window_for_screen(idx) {
-                w.host_output = None;
-            }
+            && let Some(w) = self.host.window_for_screen(idx)
+        {
+            w.host_output = None;
+        }
     }
 
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &CWlSurface, _time: u32) {
         if let Some(idx) = self.host.screen_for_surface(surface)
-            && let Some(w) = self.host.window_for_screen(idx) {
-                w.frame_pending = false;
-                if w.needs_redraw {
-                    crate::render::render_screen(self, idx);
-                }
+            && let Some(w) = self.host.window_for_screen(idx)
+        {
+            w.frame_pending = false;
+            if w.needs_redraw {
+                crate::render::render_screen(self, idx);
             }
+        }
     }
 }
 
@@ -528,19 +609,16 @@ impl SctkOutputHandler for LiviState {
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _output: WlOutput) {
         crate::ctrl::send_panels(self);
     }
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _output: WlOutput) {}
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _output: WlOutput) {
+        crate::ctrl::send_panels(self);
+    }
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _output: WlOutput) {}
 }
 
 impl WindowHandler for LiviState {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
         // A host window was closed directly -> ask its UI to close too.
-        let Some(idx) = self
-            .host
-            .windows
-            .iter()
-            .position(|(_, w)| &w.window == window)
-        else {
+        let Some(idx) = self.host.windows.iter().position(|(_, w)| &w.window == window) else {
             return;
         };
         let screen_idx = self.host.windows[idx].0;
@@ -555,12 +633,7 @@ impl WindowHandler for LiviState {
         configure: WindowConfigure,
         _serial: u32,
     ) {
-        let Some(pos) = self
-            .host
-            .windows
-            .iter()
-            .position(|(_, w)| &w.window == window)
-        else {
+        let Some(pos) = self.host.windows.iter().position(|(_, w)| &w.window == window) else {
             return;
         };
         let screen_idx = self.host.windows[pos].0;
@@ -585,29 +658,56 @@ impl WindowHandler for LiviState {
         if self.screens[screen_idx].fullscreen != host_fullscreen {
             self.screens[screen_idx].fullscreen = host_fullscreen;
         }
-        if let Some(output) = &self.screens[screen_idx].output {
-            output.change_current_state(
-                Some(smithay::output::Mode {
-                    size: (w, h).into(),
-                    refresh: 60_000,
-                }),
-                None,
-                None,
-                None,
-            );
+        // The output mode change and the video relayout each send an event the
+        // waylandsink clients crash on mid-resize, so defer them until the drag settles.
+        self.screens[screen_idx].resize_pending = Some(Instant::now() + RESIZE_SETTLE);
+        crate::layout::apply_ui_layout(self, screen_idx);
+        crate::ctrl::send_panels(self);
+    }
+}
+
+/// How long the compositor waits after the last resize step before it pushes the
+/// new output mode and relayouts the video planes.
+const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+
+/// Applies a settled resize. Deferred from `configure` so the waylandsink clients are
+/// touched once per drag, not per step. The output mode is published only at the first
+/// setup, never on a later resize, since that mode change crashes the waylandsink.
+pub fn apply_settled_resizes(state: &mut LiviState) {
+    let now = Instant::now();
+    for idx in 0..state.screens.len() {
+        let Some(deadline) = state.screens[idx].resize_pending else {
+            continue;
+        };
+        if now < deadline {
+            continue;
         }
-        let videos: Vec<usize> = self
+        state.screens[idx].resize_pending = None;
+        let (w, h) = (state.screens[idx].width, state.screens[idx].height);
+        let first_setup =
+            state.screens[idx].applied_width == 0 && state.screens[idx].applied_height == 0;
+        if first_setup && (w, h) != (0, 0) {
+            state.screens[idx].applied_width = w;
+            state.screens[idx].applied_height = h;
+            if let Some(output) = &state.screens[idx].output {
+                output.change_current_state(
+                    Some(smithay::output::Mode { size: (w, h).into(), refresh: 60_000 }),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
+        let videos: Vec<usize> = state
             .toplevels
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.kind == crate::state::Kind::Video && t.screen_idx == screen_idx)
+            .filter(|(_, t)| t.kind == crate::state::Kind::Video && t.screen_idx == idx)
             .map(|(i, _)| i)
             .collect();
         for v in videos {
-            crate::layout::apply_video_layout(self, v);
+            crate::layout::apply_video_layout(state, v);
         }
-        crate::layout::apply_ui_layout(self, screen_idx);
-        crate::ctrl::send_panels(self);
     }
 }
 
@@ -633,14 +733,24 @@ impl SctkSeatHandler for LiviState {
         let seats = self.host.sctk_seats.as_mut().unwrap();
         match capability {
             Capability::Pointer => {
-                self.host.pointer = seats.get_pointer(qh, &seat).ok();
+                let surface = self.host.sctk_compositor.as_ref().map(|c| c.create_surface(qh));
+                self.host.pointer =
+                    surface.zip(self.host.shm.as_ref()).and_then(|(surface, shm)| {
+                        seats
+                            .get_pointer_with_theme::<_, ()>(
+                                qh,
+                                &seat,
+                                shm.wl_shm(),
+                                surface,
+                                ThemeSpec::System,
+                            )
+                            .ok()
+                    });
                 self.seat.add_pointer();
             }
             Capability::Keyboard => {
                 self.host.keyboard = seats.get_keyboard(qh, &seat, None).ok();
-                self.seat
-                    .add_keyboard(Default::default(), 600, 25)
-                    .ok();
+                self.seat.add_keyboard(Default::default(), 600, 25).ok();
             }
             Capability::Touch => {
                 self.host.touch = seats.get_touch(qh, &seat).ok();
@@ -657,7 +767,13 @@ impl SctkSeatHandler for LiviState {
         );
     }
 
-    fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _seat: CWlSeat, capability: Capability) {
+    fn remove_capability(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _seat: CWlSeat,
+        capability: Capability,
+    ) {
         log::info!("input device gone: {capability:?}");
     }
 
@@ -682,7 +798,7 @@ impl PointerHandler for LiviState {
                 PointerEventKind::Enter { serial } => {
                     self.host.last_pointer_serial = serial;
                     self.host.pointer_screen = screen_idx;
-                    self.host.pointer_seen = true;
+                    apply_cursor(self);
                 }
                 PointerEventKind::Leave { .. } => {
                     self.host.pointer_screen = None;
@@ -691,8 +807,7 @@ impl PointerHandler for LiviState {
                 PointerEventKind::Motion { time } => {
                     if let Some(idx) = screen_idx.or(self.host.pointer_screen) {
                         let s = &self.screens[idx];
-                        self.host.pointer_pos =
-                            (s.x as f64 + ev.position.0, ev.position.1);
+                        self.host.pointer_pos = (s.x as f64 + ev.position.0, ev.position.1);
                         crate::input::pointer_motion(self, time);
                     }
                 }
@@ -730,7 +845,15 @@ impl TouchHandler for LiviState {
         crate::input::touch_down(self, time, id, lx, ly, screen_idx);
     }
 
-    fn up(&mut self, _: &Connection, _: &QueueHandle<Self>, _touch: &WlTouch, _serial: u32, time: u32, id: i32) {
+    fn up(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _touch: &WlTouch,
+        _serial: u32,
+        time: u32,
+        id: i32,
+    ) {
         crate::input::touch_up(self, time, id);
     }
 
@@ -747,7 +870,16 @@ impl TouchHandler for LiviState {
         crate::input::touch_motion(self, time, id, position.0, position.1);
     }
 
-    fn shape(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlTouch, _: i32, _: f64, _: f64) {}
+    fn shape(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlTouch,
+        _: i32,
+        _: f64,
+        _: f64,
+    ) {
+    }
     fn orientation(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlTouch, _: i32, _: f64) {}
 
     fn cancel(&mut self, _: &Connection, _: &QueueHandle<Self>, _touch: &WlTouch) {
@@ -768,13 +900,46 @@ impl KeyboardHandler for LiviState {
     ) {
     }
 
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: &CWlSurface, _serial: u32) {}
+    fn leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _: &CWlSurface,
+        _serial: u32,
+    ) {
+    }
 
-    fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _serial: u32, event: KeyEvent) {
+    fn press_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
         crate::input::key(self, event.time, event.raw_code, true, event.keysym);
     }
 
-    fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _serial: u32, event: KeyEvent) {
+    // The inner client repeats on its own, from the repeat info of our seat.
+    fn repeat_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _serial: u32,
+        _event: KeyEvent,
+    ) {
+    }
+
+    fn release_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
         crate::input::key(self, event.time, event.raw_code, false, event.keysym);
     }
 
@@ -785,7 +950,8 @@ impl KeyboardHandler for LiviState {
         _: &WlKeyboard,
         _serial: u32,
         modifiers: Modifiers,
-        _raw: u32,
+        _raw: RawModifiers,
+        _layout: u32,
     ) {
         crate::input::modifiers(self, modifiers);
     }
@@ -798,25 +964,37 @@ impl ProvidesRegistryState for LiviState {
     smithay_client_toolkit::registry_handlers![SctkOutputState, SctkSeatState];
 }
 
-smithay_client_toolkit::delegate_compositor!(LiviState);
-smithay_client_toolkit::delegate_output!(LiviState);
-smithay_client_toolkit::delegate_seat!(LiviState);
-smithay_client_toolkit::delegate_keyboard!(LiviState);
-smithay_client_toolkit::delegate_pointer!(LiviState);
-smithay_client_toolkit::delegate_touch!(LiviState);
-smithay_client_toolkit::delegate_xdg_shell!(LiviState);
-smithay_client_toolkit::delegate_xdg_window!(LiviState);
+impl SctkShmHandler for LiviState {
+    fn shm_state(&mut self) -> &mut Shm {
+        self.host.shm.as_mut().unwrap()
+    }
+}
+
+/// Shows on the host what the inner client asked for.
+pub fn apply_cursor(state: &LiviState) {
+    let (Some(pointer), Some(conn)) = (state.host.pointer.as_ref(), state.host.conn.as_ref())
+    else {
+        return;
+    };
+    // Refused until the pointer has entered one of our windows, the enter applies it again.
+    let _ = match state.host.cursor {
+        Some(icon) => pointer.set_cursor(conn, icon),
+        None => pointer.hide_cursor(),
+    };
+    let _ = conn.flush();
+}
+
+smithay_client_toolkit::delegate_dispatch2!(LiviState);
 smithay_client_toolkit::delegate_registry!(LiviState);
 
 pub fn request_frame(state: &mut LiviState, screen_idx: usize) {
     let qh = state.host.qh.clone();
     if let (Some(w), Some(qh)) = (state.host.window_for_screen(screen_idx), qh)
-        && !w.frame_pending {
-            w.window
-                .wl_surface()
-                .frame(&qh, w.window.wl_surface().clone());
-            w.frame_pending = true;
-        }
+        && !w.frame_pending
+    {
+        w.window.wl_surface().frame(&qh, FrameCallbackData(w.window.wl_surface().clone()));
+        w.frame_pending = true;
+    }
 }
 
 pub fn send_frame_callbacks(state: &mut LiviState) {
@@ -830,9 +1008,8 @@ pub fn send_frame_callbacks(state: &mut LiviState) {
             (),
             |_, _, _| smithay::wayland::compositor::TraversalAction::DoChildren(()),
             |_surf, states, _| {
-                let mut guard = states
-                    .cached_state
-                    .get::<smithay::wayland::compositor::SurfaceAttributes>();
+                let mut guard =
+                    states.cached_state.get::<smithay::wayland::compositor::SurfaceAttributes>();
                 for cb in guard.current().frame_callbacks.drain(..) {
                     cb.done(time_ms);
                 }

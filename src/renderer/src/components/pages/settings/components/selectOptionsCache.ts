@@ -9,10 +9,6 @@ export function getCachedOptions(node: Pick<SelectNode, 'path'>): SelectOption[]
   return cache.get(keyOf(node))
 }
 
-export function setCachedOptions(node: Pick<SelectNode, 'path'>, options: SelectOption[]): void {
-  cache.set(keyOf(node), options)
-}
-
 export async function resolveOptions(
   node: Pick<SelectNode, 'path' | 'options' | 'loadOptions'>,
   { force = false }: { force?: boolean } = {}
@@ -20,8 +16,10 @@ export async function resolveOptions(
   const key = keyOf(node)
 
   if (!force) {
+    // An empty list means the source was not reachable, not that there is nothing to choose, so
+    // it is asked again rather than kept.
     const cached = cache.get(key)
-    if (cached) return cached
+    if (cached?.length) return cached
     const pending = inflight.get(key)
     if (pending) return pending
   }

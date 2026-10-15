@@ -1,11 +1,12 @@
 // Turns the phone's telemetry messages into the JSON event lines the LIVI UI consumes.
 
+use iap2_csm::CsmMessage;
 use iap2_csm::messages::communications::CallStateUpdate;
 use iap2_csm::messages::communications::CommunicationsUpdate;
+use iap2_csm::messages::device_notifications::DeviceTimeUpdate;
 use iap2_csm::messages::now_playing::{NowPlayingUpdate, PlaybackStatus};
 use iap2_csm::messages::power::PowerUpdate;
-use iap2_csm::messages::route_guidance::RouteGuidanceUpdate;
-use iap2_csm::CsmMessage;
+use iap2_csm::messages::route_guidance::{RouteGuidanceManeuverUpdate, RouteGuidanceUpdate};
 
 use crate::framing::frame_msg_id;
 
@@ -28,12 +29,38 @@ pub fn device_json(frame: &[u8], usb_udid: Option<&str>) -> Option<String> {
     o.finish()
 }
 
+/// The start went out over the cable, naming the address the phone connects to there.
+pub fn wired_start_json(usb_udid: &str, ip: &str) -> String {
+    let mut o = Obj::new("wired-start");
+    o.str("usbUdid", usb_udid);
+    o.str("ip", ip);
+    o.finish().unwrap_or_default()
+}
+
 /// The phone's iAP2 identity, which the UI uses to route metadata to the right session.
 #[derive(Debug, Default, Clone)]
 pub struct EventTag {
     pub phone_id: Option<String>,
     pub cid: Option<String>,
     pub usb_transport_id: Option<String>,
+    pub navigation: Navigation,
+}
+
+/// The phone describes every turn of the route once, by index, and the guidance updates then
+/// point at the current one.
+#[derive(Debug, Default, Clone)]
+pub struct Navigation {
+    maneuvers: std::collections::HashMap<u16, Maneuver>,
+    current: Option<u16>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct Maneuver {
+    kind: Option<u8>,
+    side: Option<u8>,
+    junction: Option<u8>,
+    angle: Option<i16>,
+    road_after: Option<String>,
 }
 
 impl EventTag {
@@ -51,6 +78,65 @@ impl EventTag {
             if !m.usb_transport_id.is_empty() {
                 self.usb_transport_id = Some(m.usb_transport_id);
             }
+        }
+    }
+
+    /// The navigation event for a guidance or maneuver frame, with the current turn folded in.
+    pub fn navigation_json(&mut self, frame: &[u8]) -> Option<String> {
+        match frame_msg_id(frame)? {
+            0x5201 => {
+                let m = RouteGuidanceUpdate::decode(frame).ok()?;
+                if let Some(list) = &m.current_maneuver_list
+                    && list.len() >= 2
+                {
+                    self.navigation.current = Some(u16::from_be_bytes([list[0], list[1]]));
+                }
+                let mut o = Obj::new("navigation");
+                if let Some(s) = m.state {
+                    o.num("status", s);
+                }
+                if let Some(s) = m.maneuver_state {
+                    o.num("orderType", s);
+                }
+                if let Some(r) = m.current_road_name {
+                    o.str("roadName", &r);
+                }
+                if let Some(d) = m.destination_name {
+                    o.str("destinationName", &d);
+                }
+                if let Some(e) = m.eta {
+                    o.num("etaEpoch", e);
+                }
+                if let Some(t) = m.time_remaining {
+                    o.num("timeToDestination", t);
+                }
+                if let Some(d) = m.distance_remaining {
+                    o.num("distanceToDestination", d);
+                }
+                if let Some(d) = m.distance_to_maneuver {
+                    o.num("remainDistance", d);
+                }
+                if let Some(turn) =
+                    self.navigation.current.and_then(|i| self.navigation.maneuvers.get(&i))
+                {
+                    maneuver_fields(&mut o, turn);
+                }
+                o.finish()
+            }
+            0x5202 => {
+                let m = RouteGuidanceManeuverUpdate::decode(frame).ok()?;
+                let index = m.index?;
+                let current = self.navigation.current == Some(index);
+                let turn = self.navigation.maneuvers.entry(index).or_default();
+                turn.merge(m);
+                if !current {
+                    return None;
+                }
+                let mut o = Obj::new("navigation");
+                maneuver_fields(&mut o, turn);
+                o.finish()
+            }
+            _ => None,
         }
     }
 
@@ -75,8 +161,6 @@ impl EventTag {
 
 /// Seconds since the epoch from a DeviceTimeUpdate, if the phone sent one.
 pub fn device_time(frame: &[u8]) -> Option<i64> {
-    use iap2_csm::messages::device_notifications::DeviceTimeUpdate;
-
     if frame_msg_id(frame)? != 0x4E0B {
         return None;
     }
@@ -89,7 +173,7 @@ pub fn to_json(frame: &[u8]) -> Option<String> {
         0xAE01 => power(frame),
         0x4158 => cellular(frame),
         0x4155 => call(frame),
-        0x5201 => navigation(frame),
+        0x4E0B => utc_offset(frame),
         _ => None,
     }
 }
@@ -112,11 +196,7 @@ impl Obj {
         self.parts.push(format!("\"{key}\":{value}"));
     }
     fn finish(self) -> Option<String> {
-        if self.parts.len() <= 1 {
-            None
-        } else {
-            Some(format!("{{{}}}", self.parts.join(",")))
-        }
+        if self.parts.len() <= 1 { None } else { Some(format!("{{{}}}", self.parts.join(","))) }
     }
 }
 
@@ -194,6 +274,15 @@ fn cellular(frame: &[u8]) -> Option<String> {
     o.finish()
 }
 
+/// The phone's offset from UTC, daylight saving included.
+fn utc_offset(frame: &[u8]) -> Option<String> {
+    let m = DeviceTimeUpdate::decode(frame).ok()?;
+    let minutes = i32::from(m.time_zone_offset_minutes?);
+    let mut o = Obj::new("deviceTime");
+    o.num("utcOffsetMinutes", minutes);
+    o.finish()
+}
+
 fn call(frame: &[u8]) -> Option<String> {
     let m = CallStateUpdate::decode(frame).ok()?;
     let status = m.status?;
@@ -215,33 +304,92 @@ fn call(frame: &[u8]) -> Option<String> {
     o.finish()
 }
 
-fn navigation(frame: &[u8]) -> Option<String> {
-    let m = RouteGuidanceUpdate::decode(frame).ok()?;
-    let mut o = Obj::new("navigation");
-    if let Some(s) = m.state {
-        o.num("status", s);
+impl Maneuver {
+    /// Fields the phone leaves out keep their last value.
+    fn merge(&mut self, m: RouteGuidanceManeuverUpdate) {
+        self.kind = m.maneuver_type.or(self.kind);
+        self.side = m.driving_side.or(self.side);
+        self.junction = m.junction_type.or(self.junction);
+        self.angle = m.exit_angle.or(self.angle);
+        self.road_after = m.after_maneuver_road_name.or(self.road_after.take());
     }
-    if let Some(r) = m.current_road_name {
-        o.str("roadName", &r);
+}
+
+fn maneuver_fields(o: &mut Obj, turn: &Maneuver) {
+    if let Some(t) = turn.kind {
+        o.num("maneuverType", t);
     }
-    if let Some(d) = m.destination_name {
-        o.str("destinationName", &d);
+    if let Some(s) = turn.side {
+        o.num("turnSide", s);
     }
-    if let Some(e) = m.eta {
-        o.num("etaEpoch", e);
+    if let Some(j) = turn.junction {
+        o.num("junctionType", j);
     }
-    if let Some(t) = m.time_remaining {
-        o.num("timeToDestination", t);
+    if let Some(a) = turn.angle {
+        o.num("turnAngle", a);
     }
-    if let Some(d) = m.distance_remaining {
-        o.num("distanceToDestination", d);
+    if let Some(r) = &turn.road_after {
+        o.str("afterRoadName", r);
     }
-    o.finish()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_current_turn_rides_along_with_the_guidance() {
+        let mut tag = EventTag::default();
+        let turn = RouteGuidanceManeuverUpdate {
+            display_component_id: None,
+            index: Some(2),
+            maneuver_type: Some(4),
+            after_maneuver_road_name: Some("Elbchaussee".into()),
+            driving_side: None,
+            junction_type: None,
+            exit_angle: Some(-90),
+        };
+        // Not the current turn yet: kept, nothing to say.
+        assert_eq!(tag.navigation_json(&turn.encode()), None);
+
+        let guidance = RouteGuidanceUpdate {
+            display_component_id: None,
+            state: Some(1),
+            maneuver_state: Some(2),
+            current_road_name: Some("Reeperbahn".into()),
+            destination_name: None,
+            eta: None,
+            time_remaining: None,
+            distance_remaining: Some(12000),
+            distance_to_maneuver: Some(350),
+            current_maneuver_list: Some(vec![0, 2]),
+        };
+        let json = tag.navigation_json(&guidance.encode()).unwrap();
+        for part in [
+            "\"status\":1",
+            "\"orderType\":2",
+            "\"roadName\":\"Reeperbahn\"",
+            "\"remainDistance\":350",
+            "\"maneuverType\":4",
+            "\"turnAngle\":-90",
+            "\"afterRoadName\":\"Elbchaussee\"",
+        ] {
+            assert!(json.contains(part), "{json} lacks {part}");
+        }
+
+        // A later detail for the current turn goes out on its own, older fields kept.
+        let more = RouteGuidanceManeuverUpdate {
+            index: Some(2),
+            maneuver_type: None,
+            junction_type: Some(3),
+            ..turn.clone()
+        };
+        let json = tag.navigation_json(&more.encode()).unwrap();
+        assert!(
+            json.contains("\"junctionType\":3") && json.contains("\"maneuverType\":4"),
+            "{json}"
+        );
+    }
     use iap2_csm::messages::now_playing::{MediaItemAttributes, PlaybackAttributes};
 
     #[test]
@@ -287,6 +435,17 @@ mod device_tests {
     }
 
     #[test]
+    fn the_wired_start_names_the_cable_the_phone_and_the_address() {
+        let mut tag = EventTag::default();
+        tag.learn(&frame());
+        let json = tag.apply(wired_start_json("00008120000924CE2E51A01E", "fe80::80a:a1ca"));
+        assert_eq!(
+            json,
+            "{\"type\":\"wired-start\",\"usbUdid\":\"00008120000924CE2E51A01E\",\"ip\":\"fe80::80a:a1ca\",\"phoneId\":\"0C:6A:C4:4E:F3:2A\",\"usbTransportId\":\"usb-1\"}"
+        );
+    }
+
+    #[test]
     fn wired_marks_usb_udid() {
         let json = device_json(&frame(), Some("00008120000924CE2E51A01E")).unwrap();
         assert!(json.contains("\"src\":\"carkit\""));
@@ -317,6 +476,35 @@ mod device_tests {
         assert!(json.contains("\"cid\":\"ctrl-1\""), "{json}");
         assert!(json.contains("\"usbTransportId\":\"usb-1\""), "{json}");
         assert!(json.starts_with("{\"type\":\"nowplaying\""));
+    }
+
+    #[test]
+    fn daylight_saving_is_not_counted_twice() {
+        let summer = DeviceTimeUpdate {
+            seconds_since_reference_date: Some(0),
+            time_zone_offset_minutes: Some(120),
+            daylight_savings_offset_minutes: Some(60),
+        };
+        assert_eq!(
+            to_json(&summer.encode()).as_deref(),
+            Some("{\"type\":\"deviceTime\",\"utcOffsetMinutes\":120}")
+        );
+        let winter = DeviceTimeUpdate {
+            time_zone_offset_minutes: Some(60),
+            daylight_savings_offset_minutes: None,
+            ..summer
+        };
+        assert!(to_json(&winter.encode()).unwrap().ends_with(":60}"));
+    }
+
+    #[test]
+    fn a_time_without_an_offset_names_no_zone() {
+        let update = DeviceTimeUpdate {
+            seconds_since_reference_date: Some(0),
+            time_zone_offset_minutes: None,
+            daylight_savings_offset_minutes: None,
+        };
+        assert_eq!(to_json(&update.encode()), None);
     }
 
     #[test]

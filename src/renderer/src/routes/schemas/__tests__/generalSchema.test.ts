@@ -9,7 +9,7 @@ describe('generalSchema', () => {
     expect(schema.label).toBe('General')
     expect(schema.labelKey).toBe('settings.general')
     expect(schema.path).toBe('')
-    expect(schema.children).toHaveLength(12)
+    expect(schema.children).toHaveLength(10)
   })
 
   test('connections route contains names, wifi and auto connect', () => {
@@ -22,7 +22,7 @@ describe('generalSchema', () => {
       })
     )
 
-    expect(connections.children).toHaveLength(6)
+    expect(connections.children).toHaveLength(7)
 
     expect(connections.children[0]).toEqual(
       expect.objectContaining({
@@ -38,17 +38,23 @@ describe('generalSchema', () => {
     )
     expect(connections.children[3]).toEqual(
       expect.objectContaining({
-        type: 'checkbox',
-        path: 'wirelessAaEnabled'
+        type: 'select',
+        path: 'btAdapter'
       })
     )
     expect(connections.children[4]).toEqual(
       expect.objectContaining({
         type: 'checkbox',
-        path: 'wirelessCpEnabled'
+        path: 'wirelessAaEnabled'
       })
     )
     expect(connections.children[5]).toEqual(
+      expect.objectContaining({
+        type: 'checkbox',
+        path: 'wirelessCpEnabled'
+      })
+    )
+    expect(connections.children[6]).toEqual(
       expect.objectContaining({
         type: 'checkbox',
         path: 'autoConn'
@@ -56,7 +62,7 @@ describe('generalSchema', () => {
     )
   })
 
-  test('wifi route contains expected frequency options', () => {
+  test('wifi route loads the frequency options from the radio', async () => {
     const wifi = schema.children[0].children[2]
     expect(wifi).toEqual(
       expect.objectContaining({
@@ -73,14 +79,15 @@ describe('generalSchema', () => {
         displayValue: true
       })
     )
-    expect(select.options).toEqual([
+    expect(select.options).toEqual([])
+    expect(await select.loadOptions()).toEqual([
       { label: '2.4 GHz', value: '2.4ghz' },
       { label: '5 GHz', value: '5ghz' }
     ])
   })
 
   test('mfi route is a top-level entry with cp gen, i2c bus and power pin', () => {
-    const mfi = schema.children[9]
+    const mfi = schema.children[8]
     expect(mfi).toEqual(
       expect.objectContaining({
         type: 'route',
@@ -96,7 +103,7 @@ describe('generalSchema', () => {
   })
 
   test('gps route sits between mfi and the usb dongle', () => {
-    const gps = schema.children[10]
+    const gps = schema.children[9]
     expect(gps).toEqual(
       expect.objectContaining({ type: 'route', route: 'gps', labelKey: 'settings.gps' })
     )
@@ -112,24 +119,6 @@ describe('generalSchema', () => {
     for (const page of [gps.children[3], gps.children[4]]) {
       expect(page.children[0]).toEqual(expect.objectContaining({ type: 'custom' }))
     }
-  })
-
-  test('usb dongle route lives at the bottom with a single custom entry', () => {
-    const usbDongle = schema.children[11]
-    expect(usbDongle).toEqual(
-      expect.objectContaining({
-        type: 'route',
-        route: 'usbDongle',
-        labelKey: 'settings.usbDongle'
-      })
-    )
-    expect(usbDongle.children).toHaveLength(1)
-    expect(usbDongle.children[0]).toEqual(
-      expect.objectContaining({
-        type: 'custom',
-        path: 'carName'
-      })
-    )
   })
 
   test('key bindings route contains representative binding entries', () => {
@@ -244,7 +233,7 @@ describe('generalSchema', () => {
     ])
   })
 
-  test('fft delay, steering wheel, fullscreen, zoom and language nodes are configured', () => {
+  test('fft delay, zoom and language nodes are configured', () => {
     const fftDelay = schema.children[5]
     expect(fftDelay.type).toBe('number')
     expect(fftDelay.path).toBe('visualAudioDelayMs')
@@ -252,15 +241,7 @@ describe('generalSchema', () => {
     expect(fftDelay.valueTransform?.fromView?.(160)).toBe(160)
     expect(fftDelay.valueTransform?.format?.(170)).toBe('170 ms')
 
-    const steering = schema.children[6]
-    expect(steering.type).toBe('select')
-    expect(steering.path).toBe('hand')
-    expect(steering.options).toEqual([
-      { label: 'LHD', labelKey: 'settings.lhdr', value: 0 },
-      { label: 'RHD', labelKey: 'settings.rhdr', value: 1 }
-    ])
-
-    expect(schema.children[7]).toEqual(
+    expect(schema.children[6]).toEqual(
       expect.objectContaining({
         type: 'number',
         path: 'uiZoomPercent',
@@ -271,11 +252,11 @@ describe('generalSchema', () => {
       })
     )
 
-    expect(schema.children[7].valueTransform?.toView?.(120)).toBe(120)
-    expect(schema.children[7].valueTransform?.fromView?.(130)).toBe(130)
-    expect(schema.children[7].valueTransform?.format?.(140)).toBe('140%')
+    expect(schema.children[6].valueTransform?.toView?.(120)).toBe(120)
+    expect(schema.children[6].valueTransform?.fromView?.(130)).toBe(130)
+    expect(schema.children[6].valueTransform?.format?.(140)).toBe('140%')
 
-    expect(schema.children[8]).toEqual(
+    expect(schema.children[7]).toEqual(
       expect.objectContaining({
         type: 'select',
         path: 'language',
@@ -284,7 +265,8 @@ describe('generalSchema', () => {
     )
     // 客製化掛鉤點 T8：改為 arrayContaining，讓 applyCustomLanguages() 附加的語系
     // 不會弄壞這個斷言。上游的四個語系仍然被完整檢查。
-    expect(schema.children[8].options).toEqual(
+    // 索引隨上游 v9.4.0 從 8 改為 7。
+    expect(schema.children[7].options).toEqual(
       expect.arrayContaining([
         { label: 'English', labelKey: 'settings.english', value: 'en' },
         { label: 'German', labelKey: 'settings.german', value: 'de' },

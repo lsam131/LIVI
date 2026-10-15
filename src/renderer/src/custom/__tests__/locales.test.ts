@@ -44,13 +44,15 @@ describe('zh-TW 翻譯完整性', () => {
       'settings.projectionDpi',
       'settings.clusterFps',
       'settings.clusterDpi',
-      'settings.usbDongle',
       'settings.gpsFixGps',
       'settings.gpsFixDgps',
       'settings.gpsFixPps',
       'settings.gpsAgc',
-      'settings.dongleIpPlaceholder',
-      'settings.dongleIpMaskPlaceholder',
+      // 燃料類型在台灣就是直接用英文縮寫
+      'settings.carTypeE85',
+      'settings.carTypeLPG',
+      'settings.carTypeCNG',
+      'settings.carTypeLNG',
       'softwareUpdate.channelNightly'
     ])
     const untranslated = Object.keys(flatZh).filter(

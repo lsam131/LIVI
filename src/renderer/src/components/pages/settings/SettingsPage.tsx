@@ -3,7 +3,7 @@ import { SettingsLayout } from '@renderer/components/layouts'
 import { settingsSchema } from '@renderer/routes/schemas/schema'
 import type { SettingsNode } from '@renderer/routes/types'
 import type { Config } from '@shared/types'
-import { useLiviStore, useProjectionActive } from '@store/store'
+import { useLiviStore, useSessionsOpen } from '@store/store'
 import type { Key } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useParams } from 'react-router'
@@ -26,30 +26,18 @@ export function SettingsPage() {
   const { state, handleFieldChange, needsRestart, restart, requestRestart } =
     useSmartSettingsFromSchema(settingsSchema, settings)
 
-  const btDirty = useLiviStore((s) => s.bluetoothPairedDirty)
-  const applyBtList = useLiviStore((s) => s.applyBluetoothPairedList)
-
-  const wirelessAaEnabled = Boolean(settings?.wirelessAaEnabled)
-  const wirelessCpEnabled = Boolean(settings?.wirelessCpEnabled)
-  const restartAvailable = useProjectionActive() || wirelessAaEnabled || wirelessCpEnabled
+  const restartAvailable = useSessionsOpen()
 
   const handleRestart = async () => {
     if (!restartAvailable) return
 
-    if (needsRestart) {
-      await restart()
-      return
-    }
-
-    if (btDirty && typeof applyBtList === 'function') {
-      await applyBtList()
-    }
+    if (needsRestart) await restart()
   }
 
   if (!node) return null
 
   const title = node.labelKey ? t(node.labelKey) : node.label
-  const showRestart = restartAvailable && (Boolean(needsRestart) || Boolean(btDirty))
+  const showRestart = restartAvailable && Boolean(needsRestart)
 
   if ('path' in node && node.page) {
     const labelPath = node.type === 'select' ? node.labelPath : undefined

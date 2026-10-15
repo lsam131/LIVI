@@ -1,8 +1,0 @@
-import * as audio from '@main/services/audio'
-
-describe('audio index exports', () => {
-  test('re-exports expected symbols', () => {
-    expect(audio.HostAudioOutput).toBeDefined()
-    expect(audio.Microphone).toBeDefined()
-  })
-})

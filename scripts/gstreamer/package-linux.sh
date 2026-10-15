@@ -25,10 +25,16 @@ copy_if_exists() {
 }
 
 real_path() {
-  python3 - <<'PY' "$1"
-import os, sys
-print(os.path.realpath(sys.argv[1]))
-PY
+  local p=$1 link dir
+  while [ -L "$p" ]; do
+    link=$(readlink "$p")
+    case "$link" in
+      /*) p=$link ;;
+      *) dir=$(dirname "$p"); p=${dir%/}/$link ;;
+    esac
+  done
+  dir=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd -P) || { printf '%s\n' "$p"; return; }
+  printf '%s/%s\n' "${dir%/}" "$(basename "$p")"
 }
 
 is_system_excluded() {
@@ -312,11 +318,24 @@ plugins=(
   libgstvideoconvertscale.so
   libgstopengl.so
   libgstlibav.so
+  # video LIVI fetches from a URL: playbin3, hlsdemux2, souphttpsrc, qtdemux
+  libgstplayback.so
+  libgstadaptivedemux2.so
+  libgstsoup.so
+  libgstisomp4.so
 )
 
 for plugin in "${plugins[@]}"; do
   copy_plugin_and_deps "$PLUGIN_DIR/$plugin"
 done
+
+# Both soup plugins dlopen libsoup, so ldd never names it.
+SOUP="$(ldconfig -p | awk '$1 == "libsoup-3.0.so.0" { print $NF; exit }')"
+if [[ -z "$SOUP" ]]; then
+  echo "libsoup-3.0.so.0 not found, souphttpsrc and hlsdemux2 would not load" >&2
+  exit 1
+fi
+queue_dep "$SOUP"
 
 # video HW decode + DRM/KMS sink — host-dependent
 optional_plugins=(
@@ -324,6 +343,7 @@ optional_plugins=(
   libgstv4l2codecs.so    # v4l2slh264dec/v4l2slh265dec (Pi 5 stateless HEVC)
   libgstkms.so           # kmssink (DRM overlay plane, kiosk)
   libgstva.so            # vah264dec/vah265dec (x86 VA-API)
+  libgstnvcodec.so       # nvh264dec/nvh265dec (NVIDIA NVDEC, CUDA from the host driver)
   libgstwaylandsink.so   # waylandsink (wlroots/cage)
 )
 
@@ -346,9 +366,11 @@ for f in "$OUT"/bin/*;                   do [ -f "$f" ] && patchelf --set-rpath 
 for f in "$OUT"/libexec/gstreamer-1.0/*; do [ -f "$f" ] && patchelf --set-rpath '$ORIGIN/../../lib' "$f" 2>/dev/null || true; done
 
 # Record the Debian package versions that fed this bundle.
-dpkg-query -W -f='${binary:Package} ${Version}\n' 2>/dev/null \
-  | grep -E '^(gstreamer1\.0-|libgstreamer)' \
-  | sort > "$OUT/packages.txt"
+{
+  dpkg-query -W -f='${binary:Package} ${Version}\n' 2>/dev/null \
+    | grep -E '^(gstreamer1\.0-|libgstreamer)' | grep -v '^libgstreamer-plugins-bad' || true
+  cat /usr/share/gst-build/meson-builds.txt 2>/dev/null || true
+} | sort > "$OUT/packages.txt"
 echo "Wrote provenance: $OUT/packages.txt ($(wc -l < "$OUT/packages.txt") packages)"
 
 echo "Created linux-x64/linux-arm64 GStreamer bundle at: $OUT"

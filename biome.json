@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.5.11/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
   "files": {
     "includes": [
       "src/**",
@@ -15,6 +15,7 @@
       "vitest.main.setup.ts",
       "!src/renderer/out/**",
       "!src/main/services/time/vendor/**",
+      "!src/main/shared/core/contract.ts",
       "!coverage/**",
       "!dist/**",
       "!out/**",

@@ -2,11 +2,13 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
 
-use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 
-use iap2_link::{Event, LinkConfig, LinkEngine, LinkState, CONTROL_SESSION_ID, FILE_TRANSFER_SESSION_ID};
+use iap2_link::{
+    CONTROL_SESSION_ID, Event, FILE_TRANSFER_SESSION_ID, LinkConfig, LinkEngine, LinkState,
+};
 
 use crate::file_transfer::{FileTransferReceiver, FtOutput};
 use crate::framing::FrameReader;
@@ -26,10 +28,13 @@ impl ControlChannel for LinkChannel {
     }
 }
 
-/// Completed file-transfer payloads (album artwork) the phone pushed over the link.
 pub type ArtworkRx = mpsc::UnboundedReceiver<Vec<u8>>;
 
-pub fn spawn_link(fd: OwnedFd, cfg: LinkConfig, initiate_negotiate: bool) -> (LinkChannel, ArtworkRx) {
+pub fn spawn_link(
+    fd: OwnedFd,
+    cfg: LinkConfig,
+    initiate_negotiate: bool,
+) -> (LinkChannel, ArtworkRx) {
     set_nonblocking(fd.as_raw_fd());
     let (out_tx, out_rx) = mpsc::unbounded_channel();
     let (in_tx, in_rx) = mpsc::unbounded_channel();
@@ -103,9 +108,6 @@ async fn pump(
     }
 }
 
-/// Moves engine events out to the session: control frames get reassembled into CSM frames,
-/// file transfers are acknowledged and completed artwork forwarded. Returns false when the
-/// link is finished.
 fn drain_events(
     engine: &mut LinkEngine,
     reader: &mut FrameReader,
@@ -154,9 +156,12 @@ fn drain_events(
     engine.state() != LinkState::Dead
 }
 
-/// Drives the link over any byte stream (the wired carkit TLS channel), splitting it so
-/// reads never block outgoing ACKs.
-pub fn spawn_link_stream<S>(stream: S, cfg: LinkConfig, initiate_negotiate: bool) -> (LinkChannel, ArtworkRx)
+/// Split, so reads never block outgoing ACKs.
+pub fn spawn_link_stream<S>(
+    stream: S,
+    cfg: LinkConfig,
+    initiate_negotiate: bool,
+) -> (LinkChannel, ArtworkRx)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -190,7 +195,11 @@ where
         let mut buf = [0u8; 8192];
         loop {
             match rd.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(e) => {
+                    eprintln!("[link] reading from the phone failed: {e}");
+                    break;
+                }
                 Ok(n) => {
                     if rx_tx.send(buf[..n].to_vec()).is_err() {
                         break;
@@ -208,6 +217,7 @@ where
     let mut reader = FrameReader::default();
     let mut ft = FileTransferReceiver::default();
     let mut pending = engine.take_output();
+    let mut state = engine.state();
 
     loop {
         if !pending.is_empty() {
@@ -236,7 +246,13 @@ where
         engine.advance_time(now());
         pending.extend(engine.take_output());
 
-        if !drain_events(&mut engine, &mut reader, &mut ft, &in_tx, &art_tx, &mut pending, now()) {
+        let alive =
+            drain_events(&mut engine, &mut reader, &mut ft, &in_tx, &art_tx, &mut pending, now());
+        if engine.state() != state {
+            println!("[link] {state:?} -> {:?} after {} ms", engine.state(), now());
+            state = engine.state();
+        }
+        if !alive {
             return Ok(());
         }
     }
@@ -253,18 +269,10 @@ fn set_nonblocking(fd: RawFd) {
 
 fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-    if n < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(n as usize)
-    }
+    if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
 }
 
 fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
     let n = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
-    if n < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(n as usize)
-    }
+    if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
 }

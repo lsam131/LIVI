@@ -1,6 +1,6 @@
 import type { Config } from '@shared/types'
 import { DEFAULT_BINDINGS } from '@shared/types'
-import { CarType, HandDriveType, PhoneWorkMode } from '@shared/types/Config'
+import { CarType, HandDriveType } from '@shared/types/Config'
 
 export const DEFAULT_CONFIG: Config = {
   dismissedPackages: [],
@@ -32,25 +32,28 @@ export const DEFAULT_CONFIG: Config = {
   clusterSafeAreaLeft: 300,
   clusterSafeAreaRight: 300,
   lastConnectedAaBtMac: '',
-  lastPhoneWorkMode: PhoneWorkMode.CarPlay,
   carName: 'LIVI',
   oemName: 'App',
   darkMode: true,
+  overlayMessages: true,
   displayBrightness: 1.0,
   displayBrightnessAuto: true,
-  nightMode: true,
   hand: HandDriveType.LHD,
   samplingFrequency: 1,
   autoConn: true,
-  UseBTPhone: false,
   disableAudioOutput: false,
   wifiType: '5ghz',
   wifiChannel: 36,
   wifiChannelWidth: 40,
   country: 'DE',
-  phoneConfig: {},
   carType: CarType.Gasoline,
   evConnectorTypes: [],
+  maxSpeedKph: 200,
+  speedScaleStep: 40,
+  maxRpm: 5000,
+  redlineRpm: 4500,
+  speedUnit: 'kmh',
+  temperatureUnit: 'celsius',
   wirelessAaEnabled: false,
   wirelessCpEnabled: false,
   wifiPassword: '12345678',
@@ -82,7 +85,6 @@ export const DEFAULT_CONFIG: Config = {
   cameraMirror: false,
   cameraRotation: 0,
   autoSwitchOnReverse: true,
-  dongleToolsIp: '',
   visualAudioDelayMs: 0,
   huVolume: 0.95,
   huVolumeLinkSystem: true,
@@ -120,7 +122,9 @@ export const DEFAULT_CONFIG: Config = {
   },
   media: { main: true, dash: false, aux: false },
   bindings: DEFAULT_BINDINGS,
-  dongleIcon120: '',
-  dongleIcon180: '',
-  dongleIcon256: ''
+  carplayIcon120: '',
+  carplayIcon180: '',
+  carplayIcon256: '',
+  // 0,0 counts as no fix, the entry only lets a saved one through validate()
+  lastKnownGps: { lat: 0, lng: 0, ts: 0 }
 }

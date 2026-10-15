@@ -4,7 +4,6 @@
     "src/renderer/src/env.d.ts",
     "src/renderer/src/**/*",
     "src/renderer/src/**/*.tsx",
-    "src/preload/*.d.ts",
     "src/types/**/*"
   ],
   "exclude": ["**/__tests__/**", "**/*.test.ts", "**/*.test.tsx"],
@@ -14,7 +13,7 @@
     "target": "es2024",
     "module": "es2022",
     "lib": ["dom", "dom.iterable", "es2024", "webworker"],
-    "types": ["w3c-web-usb", "vite/client"],
+    "types": ["vite/client"],
     "allowJs": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
@@ -30,11 +29,8 @@
       "@pkg": ["./package.json"],
       "@settings/*": ["./src/renderer/src/components/pages/settings/*"],
       "@renderer/*": ["./src/renderer/src/*"],
-      "@projection/messages": ["./src/main/services/projection/messages/index.ts"],
-      "@projection/messages/*": ["./src/main/services/projection/messages/*"],
       "@main/*": ["./src/main/*"],
       "@shared/*": ["./src/main/shared/*"],
-      "@worker/*": ["./src/renderer/src/components/worker/*"],
       "@store/*": ["./src/renderer/src/store/*"],
       "@utils/*": ["./src/renderer/src/utils/*"],
       "@types/*": ["./src/renderer/src/types/*"]
