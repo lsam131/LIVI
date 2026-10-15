@@ -19,6 +19,10 @@ fn now_unix() -> i64 {
 
 /// Steps the clock to `secs` when it is far enough off and GNSS is not holding it.
 pub fn step_to(secs: i64) {
+    // A Mac keeps its own time.
+    if !cfg!(target_os = "linux") {
+        return;
+    }
     if gps_owns_clock() {
         println!("[cp] device time: GPS holds the clock, leaving it alone");
         return;
@@ -28,9 +32,9 @@ pub fn step_to(secs: i64) {
         println!("[cp] device time: offset {offset}s, keeping the system clock");
         return;
     }
-    match Command::new("date").args(["-u", "-s", &format!("@{secs}")]).output() {
+    match Command::new(crate::sys::tool("date")).args(["-u", "-s", &format!("@{secs}")]).output() {
         Ok(out) if out.status.success() => {
-            let _ = Command::new("fake-hwclock").arg("save").output();
+            let _ = Command::new(crate::sys::tool("fake-hwclock")).arg("save").output();
             println!("[cp] device time: system clock stepped by {offset}s");
         }
         Ok(out) => eprintln!(

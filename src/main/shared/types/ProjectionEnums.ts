@@ -1,55 +1,29 @@
 export enum CommandMapping {
-  invalid = 0, // 'invalid'
-  startRecordAudio = 1,
-  stopRecordAudio = 2,
-  requestHostUI = 3, // 'Projection interface My Car button clicked'
-  disableBluetooth = 4,
-  voiceAssistant = 5, // PTT press (VOICE_ASSIST keycode)
-  voiceAssistantRelease = 6, // PTT release
-  mic = 7, // 'Car Microphone'
-  boxMic = 8, // 'Dongle integrated Microphone'
+  requestHostUI = 3, // the My Car button in the projection
+  voiceAssistant = 5,
+  voiceAssistantRelease = 6,
   frame = 12,
-  hideUI = 14,
-  boxMici2s = 15, // 'Box Microphone'
-  enableNightMode = 16,
-  disableNightMode = 17,
-  startGnssReport = 18,
-  stopGnssReport = 19,
-  phoneMic = 21, // 'Phone Microphone'
-  audioTransferOn = 22, // Disable audio
-  audioTransferOff = 23, // Default - Phone streams audio to LIVI
-  wifi24g = 24, // '2.4G Wifi'
-  wifi5g = 25, // '5G Wifi'
-  refreshFrame = 26,
-  enableStandbyMode = 28,
-  disableStandbyMode = 29,
-  startBleAdvertising = 30,
-  stopBleAdvertising = 31,
 
-  // D-PAD
-  left = 100, // 'Button Left'
-  right = 101, // 'Button Right'
-  up = 102, // 'Button Up'
-  down = 103, // 'Button Down'
-  selectDown = 104, // 'Button Select Down'
-  selectUp = 105, // 'Button Select Up'
-  back = 106, // 'Button Back'
+  left = 100,
+  right = 101,
+  up = 102,
+  down = 103,
+  selectDown = 104,
+  selectUp = 105,
+  back = 106,
 
-  // Rotary Knob
   knobLeft = 111,
   knobRight = 112,
   knobUp = 113,
   knobDown = 114,
 
-  // Media Control
-  home = 200, // 'Button Home'
-  play = 201, // 'Button Play'
-  pause = 202, // 'Button Pause'
-  playPause = 203, // 'Button Toggle Play/Pause'
-  next = 204, // 'Button Next Track'
-  prev = 205, // 'Button Prev Track'
+  home = 200,
+  play = 201,
+  pause = 202,
+  playPause = 203,
+  next = 204,
+  prev = 205,
 
-  // Phone
   acceptPhone = 300,
   rejectPhone = 301,
   phoneKey0 = 302,
@@ -66,38 +40,16 @@ export enum CommandMapping {
   phoneKeyHash = 313,
   phoneKeyHookSwitch = 314,
 
-  // Internal projection UI (main -> renderer): CarPlay Siri speech-mode attention.
-  voiceAssistantUiActive = 600, // speech mode recognizing/speaking
-  voiceAssistantUiIdle = 601, // speech mode none (Siri fully done, incl. response)
+  // CarPlay Siri speech mode, for the projection UI only
+  voiceAssistantUiActive = 600, // recognizing or speaking
+  voiceAssistantUiIdle = 601, // Siri is done, its answer included
 
   // Android Auto
   requestVideoFocus = 500,
   releaseVideoFocus = 501,
-  requestAudioFocusDuck = 504,
-  releaseAudioFocus = 505,
   requestClusterFocus = 506,
-  releaseClusterFocus = 507,
-  requestClusterStreamFocus = 508,
-  releaseClusterStreamFocus = 509,
-
-  // Connection Status Commands
-  wifiEnable = 1000,
-  autoConnetEnable = 1001,
-  wifiConnect = 1002,
-  scanningDevice = 1003,
-  deviceFound = 1004,
-  deviceNotFound = 1005,
-  connectDeviceFailed = 1006,
-  btConnected = 1007,
-  btDisconnected = 1008,
-  wifiConnected = 1009,
-  wifiDisconnected = 1010,
-  btPairStart = 1011,
-  wifiPair = 1012,
-  getBtOnlineList = 1013
+  requestClusterStreamFocus = 508
 }
-
-export type CommandValue = keyof typeof CommandMapping
 
 export enum AudioCommand {
   AudioOutputStart = 1,
@@ -116,16 +68,4 @@ export enum AudioCommand {
   AudioAttentionRinging = 14,
   AudioTurnByTurnStart = 15,
   AudioTurnByTurnStop = 16
-}
-
-export enum TouchAction {
-  Down = 14,
-  Move = 15,
-  Up = 16
-}
-
-export enum MultiTouchAction {
-  Down = 1,
-  Move = 2,
-  Up = 0
 }

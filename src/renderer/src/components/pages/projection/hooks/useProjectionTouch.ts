@@ -1,5 +1,6 @@
-import { MultiTouchAction, TouchAction } from '@shared/types/ProjectionEnums'
+import type { Phase, Point } from '@shared/core/contract'
 import { type RefObject, useCallback, useEffect, useMemo, useRef } from 'react'
+import { sendInput } from '../../../../store/store'
 
 type Handlers = {
   onPointerDown: React.PointerEventHandler<HTMLDivElement>
@@ -11,75 +12,27 @@ type Handlers = {
   onContextMenu: React.MouseEventHandler<HTMLDivElement>
 }
 
-type MTPoint = { id: number; x: number; y: number; action: MultiTouchAction }
+const sendPointer = (points: Point[]) => sendInput({ kind: 'pointer', screen: 'main', points })
 
-type TouchTransform = {
-  streamWidth: number
-  streamHeight: number
-  cropLeft: number
-  cropTop: number
-  visibleWidth: number
-  visibleHeight: number
-}
-
-const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v)
+/** The mouse is finger 0. */
+const sendMouse = (x: number, y: number, phase: Phase) => sendPointer([{ id: 0, x, y, phase }])
 
 const norm = (
   eventTarget: HTMLElement,
   videoRef: RefObject<HTMLElement | null>,
   cx: number,
-  cy: number,
-  transform?: TouchTransform
+  cy: number
 ) => {
   const target = videoRef.current ?? eventTarget
   const r = target.getBoundingClientRect()
   if (r.width <= 0 || r.height <= 0) return null
-
-  // No usable transform yet: map straight to the container.
-  if (
-    !transform ||
-    transform.visibleWidth <= 0 ||
-    transform.visibleHeight <= 0 ||
-    transform.streamWidth <= 0 ||
-    transform.streamHeight <= 0
-  ) {
-    const lx = cx - r.left
-    const ly = cy - r.top
-    if (lx < 0 || lx > r.width || ly < 0 || ly > r.height) return null
-    return { x: clamp01(lx / r.width), y: clamp01(ly / r.height) }
-  }
-
-  // display-letterbox by the content AR
-  const contentAR = transform.visibleWidth / transform.visibleHeight
-  let dispW = r.width
-  let dispH = r.height
-  let offX = 0
-  let offY = 0
-  if (r.width / r.height > contentAR) {
-    dispW = r.height * contentAR
-    offX = (r.width - dispW) / 2
-  } else {
-    dispH = r.width / contentAR
-    offY = (r.height - dispH) / 2
-  }
-
-  const lx = cx - r.left - offX
-  const ly = cy - r.top - offY
-  if (lx < 0 || lx > dispW || ly < 0 || ly > dispH) return null
-
-  // content-crop onto the transport tier
-  const streamX = transform.cropLeft + (lx / dispW) * transform.visibleWidth
-  const streamY = transform.cropTop + (ly / dispH) * transform.visibleHeight
-  return {
-    x: clamp01(streamX / transform.streamWidth),
-    y: clamp01(streamY / transform.streamHeight)
-  }
+  const lx = cx - r.left
+  const ly = cy - r.top
+  if (lx < 0 || lx > r.width || ly < 0 || ly > r.height) return null
+  return { x: lx / r.width, y: ly / r.height }
 }
 
-export const useProjectionMultiTouch = (
-  videoRef: RefObject<HTMLElement | null>,
-  transform?: TouchTransform
-): Handlers => {
+export const useProjectionMultiTouch = (videoRef: RefObject<HTMLElement | null>): Handlers => {
   const slotByPointerId = useRef(new Map<number, number>())
   const active = useRef(new Map<number, { x: number; y: number }>())
   const freeSlots = useRef<number[]>([])
@@ -104,13 +57,12 @@ export const useProjectionMultiTouch = (
     freeSlots.current.push(slot)
   }, [])
 
-  const sendFullFrame = useCallback((overrides?: Map<number, MultiTouchAction>) => {
-    const pts: MTPoint[] = []
+  const sendFullFrame = useCallback((overrides?: Map<number, Phase>) => {
+    const pts: Point[] = []
     active.current.forEach((pos, id) => {
-      const action = overrides?.get(id) ?? MultiTouchAction.Move
-      pts.push({ id, x: pos.x, y: pos.y, action })
+      pts.push({ id, x: pos.x, y: pos.y, phase: overrides?.get(id) ?? 'move' })
     })
-    window.projection.ipc.sendMultiTouch(pts)
+    sendPointer(pts)
   }, [])
 
   const cancelFlush = useCallback(() => {
@@ -127,7 +79,7 @@ export const useProjectionMultiTouch = (
     rafId.current = requestAnimationFrame(() => {
       rafId.current = null
       if (mouseDown.current && lastMouse.current) {
-        window.projection.ipc.sendTouch(lastMouse.current.x, lastMouse.current.y, TouchAction.Move)
+        sendMouse(lastMouse.current.x, lastMouse.current.y, 'move')
       } else {
         sendFullFrame()
       }
@@ -136,34 +88,49 @@ export const useProjectionMultiTouch = (
 
   useEffect(() => cancelFlush, [cancelFlush])
 
+  /** Lifts the mouse's finger where it last was on the picture, so the phone never keeps it. */
+  const releaseMouse = useCallback((at: { x: number; y: number } | null) => {
+    mouseDown.current = false
+    const { x, y } = at ?? (lastMouse.current as { x: number; y: number })
+    sendMouse(x, y, 'up')
+  }, [])
+
   const onPointerDown = useCallback<Handlers['onPointerDown']>(
     (e) => {
       const el = e.currentTarget as HTMLElement
-      const p = norm(el, videoRef, e.clientX, e.clientY, transform)
+      const p = norm(el, videoRef, e.clientX, e.clientY)
       if (!p) return
       const { x, y } = p
       cancelFlush()
+      // Keeps the release coming to us when it happens off the picture or off the window
+      el.setPointerCapture?.(e.pointerId)
 
       if (e.pointerType === 'mouse') {
         mouseDown.current = true
-        window.projection.ipc.sendTouch(x, y, TouchAction.Down)
+        lastMouse.current = { x, y }
+        sendMouse(x, y, 'down')
         return
       }
 
-      el.setPointerCapture?.(e.pointerId)
       const id = alloc(e.pointerId)
       active.current.set(id, { x, y })
-      const overrides = new Map<number, MultiTouchAction>()
-      overrides.set(id, MultiTouchAction.Down)
+      const overrides = new Map<number, Phase>()
+      overrides.set(id, 'down')
       sendFullFrame(overrides)
     },
-    [alloc, cancelFlush, sendFullFrame, videoRef, transform]
+    [alloc, cancelFlush, sendFullFrame, videoRef]
   )
 
   const onPointerMove = useCallback<Handlers['onPointerMove']>(
     (e) => {
+      // The button came up where no pointerup reached us, such as outside the window.
+      if (e.pointerType === 'mouse' && mouseDown.current && (e.buttons & 1) === 0) {
+        cancelFlush()
+        releaseMouse(null)
+        return
+      }
       const el = e.currentTarget as HTMLElement
-      const p = norm(el, videoRef, e.clientX, e.clientY, transform)
+      const p = norm(el, videoRef, e.clientX, e.clientY)
       if (!p) return
       const { x, y } = p
 
@@ -179,25 +146,19 @@ export const useProjectionMultiTouch = (
       active.current.set(id, { x, y })
       scheduleMove()
     },
-    [scheduleMove, videoRef, transform]
+    [cancelFlush, releaseMouse, scheduleMove, videoRef]
   )
 
   const finishPointer = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       const el = e.currentTarget as HTMLElement
-      const p = norm(el, videoRef, e.clientX, e.clientY, transform)
+      const p = norm(el, videoRef, e.clientX, e.clientY)
       cancelFlush()
 
       if (e.pointerType === 'mouse') {
         if (!mouseDown.current) return
-        if (!p) {
-          mouseDown.current = false
-          return
-        }
-
-        const { x, y } = p
-        mouseDown.current = false
-        window.projection.ipc.sendTouch(x, y, TouchAction.Up)
+        el.releasePointerCapture?.(e.pointerId)
+        releaseMouse(p)
         return
       }
 
@@ -209,14 +170,14 @@ export const useProjectionMultiTouch = (
       const y = p?.y ?? last.y
 
       active.current.set(id, { x, y })
-      const overrides = new Map<number, MultiTouchAction>()
-      overrides.set(id, MultiTouchAction.Up)
+      const overrides = new Map<number, Phase>()
+      overrides.set(id, 'up')
       sendFullFrame(overrides)
 
       el.releasePointerCapture?.(e.pointerId)
       free(e.pointerId)
     },
-    [cancelFlush, free, sendFullFrame, videoRef, transform]
+    [cancelFlush, free, releaseMouse, sendFullFrame, videoRef]
   )
 
   const onPointerUp = useCallback<Handlers['onPointerUp']>((e) => finishPointer(e), [finishPointer])

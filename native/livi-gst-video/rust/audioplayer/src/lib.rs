@@ -13,7 +13,7 @@ use gstreamer_audio as gst_audio;
 use gstreamer_controller as gst_controller;
 use gstreamer_controller::prelude::*;
 
-use livi_audio_stream::{reframe_aac, rtp_caps, Codec, RTP_HEADER_LEN};
+use livi_audio_stream::{Codec, RTP_HEADER_LEN, reframe_aac, rtp_caps};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once};
@@ -47,28 +47,30 @@ fn decoder_chain(codec: Codec) -> Option<&'static str> {
     }
 }
 
-/// The sink and its buffering. `sync=false` everywhere, since the pacing
-/// happens upstream in the jitter buffer and clocksync.
+/// The only thing about audio output that differs between the systems: which sink carries it,
+/// and what that sink calls a device.
+const fn audio_sink() -> (&'static str, &'static str) {
+    if cfg!(target_os = "macos") { ("osxaudiosink", "unique-id") } else { ("pulsesink", "device") }
+}
+
+const SINK_NAME: &str = "audio-sink";
+
 fn sink_chain(cfg: &Config) -> String {
-    let mut sink = if cfg!(target_os = "macos") {
-        String::from("osxaudiosink")
-    } else if cfg.realtime {
-        String::from("pulsesink sync=false")
+    let (element, _device_property) = audio_sink();
+    if cfg.realtime {
+        format!("{element} name={SINK_NAME} sync=false")
     } else {
-        String::from("pulsesink sync=false buffer-time=300000 latency-time=30000")
-    };
-    if let Some(device) = &cfg.device {
-        let prop = if cfg!(target_os = "macos") { "unique-id" } else { "device" };
-        sink.push_str(&format!(" {prop}={device}"));
+        format!("{element} name={SINK_NAME} sync=false buffer-time=300000 latency-time=30000")
     }
-    sink
 }
 
 /// The whole pipeline for `cfg`. The caps go onto the appsrc afterwards, so the
 /// RFC 3640 fields keep their string types.
 pub fn pipeline_desc(cfg: &Config) -> String {
     let head = match decoder_chain(cfg.codec) {
-        Some(chain) => format!("{} ! ", chain.replace("{latency}", &cfg.latency_ms.max(100).to_string())),
+        Some(chain) => {
+            format!("{} ! ", chain.replace("{latency}", &cfg.latency_ms.max(100).to_string()))
+        }
         None => String::new(),
     };
     format!(
@@ -112,6 +114,12 @@ impl Player {
             }
         };
 
+        if let Some(device) = &cfg.device {
+            let (_, device_property) = audio_sink();
+            let sink = pipeline.by_name(SINK_NAME)?;
+            sink.set_property(device_property, device.as_str());
+        }
+
         let appsrc = pipeline.by_name("src")?.downcast::<gst_app::AppSrc>().ok()?;
         let caps = gst::Caps::from_str(&rtp_caps(
             cfg.codec,
@@ -149,7 +157,10 @@ impl Player {
                             .as_chunks::<2>()
                             .0
                             .chunks(ch)
-                            .map(|f| (f.iter().map(|b| i16::from_le_bytes(*b) as i32).sum::<i32>() / ch as i32) as i16)
+                            .map(|f| {
+                                (f.iter().map(|b| i16::from_le_bytes(*b) as i32).sum::<i32>()
+                                    / ch as i32) as i16
+                            })
                             .collect(),
                         gst_audio::AudioFormat::F32le => map
                             .as_slice()
@@ -157,7 +168,8 @@ impl Player {
                             .0
                             .chunks(ch)
                             .map(|f| {
-                                let avg = f.iter().map(|b| f32::from_le_bytes(*b)).sum::<f32>() / ch as f32;
+                                let avg = f.iter().map(|b| f32::from_le_bytes(*b)).sum::<f32>()
+                                    / ch as f32;
                                 (avg.clamp(-1.0, 1.0) * 32767.0) as i16
                             })
                             .collect(),
@@ -181,7 +193,11 @@ impl Player {
             let label = cfg.label.clone();
             bus.set_sync_handler(move |_, msg| {
                 if let gst::MessageView::Error(e) = msg.view() {
-                    eprintln!("[cp_audio:{label}] {} | {}", e.error(), e.debug().unwrap_or_default());
+                    eprintln!(
+                        "[cp_audio:{label}] {} | {}",
+                        e.error(),
+                        e.debug().unwrap_or_default()
+                    );
                 }
                 gst::BusSyncReply::Pass
             });
@@ -219,6 +235,10 @@ impl Player {
 
     pub fn start(&self) {
         let _ = self.pipeline.set_state(gst::State::Playing);
+    }
+
+    pub fn stop(&self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
     }
 
     /// Feeds one decrypted RTP packet. False when the source no longer takes it.
@@ -310,9 +330,22 @@ mod tests {
                 "audioresample",
                 "audio/x-raw,format=S16LE,rate=48000,channels=2",
                 "queue",
-                if cfg!(target_os = "macos") { "osxaudiosink" } else { "pulsesink" },
+                audio_sink().0,
             ]
         );
+    }
+
+    #[test]
+    fn the_sink_is_fed_the_same_way_on_both_systems() {
+        // Only the element differs; the buffered stream gets its reserve and nothing below
+        // clocksync paces a second time.
+        let buffered = sink_chain(&cfg(Codec::AacLc, false));
+        assert!(buffered.contains("sync=false"), "{buffered}");
+        assert!(buffered.contains("buffer-time=300000"), "{buffered}");
+        assert!(buffered.contains("latency-time=30000"), "{buffered}");
+        let realtime = sink_chain(&cfg(Codec::Opus, true));
+        assert!(realtime.contains("sync=false"), "{realtime}");
+        assert!(!realtime.contains("buffer-time"), "{realtime}");
     }
 
     #[test]
@@ -358,13 +391,16 @@ mod tests {
     }
 
     #[test]
-    fn a_named_device_reaches_the_sink() {
+    fn the_desc_never_carries_the_device_string() {
         let mut c = cfg(Codec::Opus, false);
-        c.device = Some("alsa_output.front".into());
+        c.device =
+            Some("AppleUSBAudioEngine:Unknown Manufacturer:USB PnP Audio Device:131200:1".into());
 
         let desc = pipeline_desc(&c);
-        let prop = if cfg!(target_os = "macos") { "unique-id" } else { "device" };
-        assert!(desc.contains(&format!("{prop}=alsa_output.front")));
+        assert!(desc.contains(&format!("name={SINK_NAME}")), "desc = {desc}");
+        assert!(!desc.contains("unique-id="), "desc = {desc}");
+        assert!(!desc.contains(" device="), "desc = {desc}");
+        assert!(!desc.contains("USB PnP"), "device string leaked into desc: {desc}");
     }
 
     #[test]

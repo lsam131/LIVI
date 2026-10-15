@@ -8,17 +8,20 @@ pub mod events;
 pub mod file_transfer;
 pub mod framing;
 pub mod hfp;
-pub mod sco;
-pub mod wifi_ap;
 pub mod ident;
 pub mod livi_sock;
 pub mod net;
+pub mod privileged;
 pub mod reconnect;
+pub mod sco;
+pub mod shared_sock;
 pub mod state;
+pub mod sys;
+pub mod vehicle;
+pub mod wifi_ap;
 
 #[cfg(target_os = "linux")]
 pub mod bt;
-#[cfg(target_os = "linux")]
 pub mod mfi_async;
 
 use std::future::Future;

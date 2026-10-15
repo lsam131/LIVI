@@ -4,6 +4,8 @@ productName: LIVI
 directories:
   buildResources: assets
 
+afterPack: ./scripts/after-pack.mjs
+
 files:
   - out/**
   - package.json
@@ -15,18 +17,11 @@ files:
   - '!**/.vscode/**'
   - '!**/*.map'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,CHANGELOG.md,README.md}'
-  - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!src/**'
-  - '!out/main/driver/**'
   - '!out/compositor/**'
-  - '!**/node_modules/livi-gst-video/{rust,src}/**'
-  - '!**/node_modules/livi-crypto/{rust,src}/**'
 
 asarUnpack:
   - resources/**
-  - node_modules/usb/**
-  - node_modules/livi-gst-video/**
-  - node_modules/livi-crypto/**
 
 linux:
   target:
@@ -42,30 +37,30 @@ linux:
       to: ../share/metainfo/dev.f-io.livi.metainfo.xml
     - from: assets/linux/99-LIVI.rules.template
       to: 99-LIVI.rules.template
-    - from: assets/linux/99-LIVI-bt.sudoers.template
-      to: 99-LIVI-bt.sudoers.template
+    - from: assets/linux/99-LIVI-helper.sudoers.template
+      to: 99-LIVI-helper.sudoers.template
+    - from: assets/linux/livi-wifi-ap.service.template
+      to: livi-wifi-ap.service.template
+    - from: assets/linux/99-LIVI-wifi-ap.sudoers.template
+      to: 99-LIVI-wifi-ap.sudoers.template
     - from: assets/linux/livi-touch-filter
       to: livi-touch-filter
     - from: assets/displays
       to: displays
     - from: scripts/install/pi/setup-hdmi-pr-display.sh
       to: setup-hdmi-pr-display.sh
-    - from: scripts/install/packages.txt
-      to: packages.txt
-    - from: assets/gstreamer/linux-x64
-      to: gstreamer/linux-x64
+    - from: assets/gstreamer/linux-${arch}
+      to: gstreamer/linux-${arch}
       filter:
         - '**/*'
         - '!**/*.a'
         - '!share/**'
-    - from: assets/gstreamer/linux-arm64
-      to: gstreamer/linux-arm64
-      filter:
-        - '**/*'
-        - '!**/*.a'
-        - '!share/**'
-    - from: native/livi-helperd/target/release/livi-helperd
+    - from: native/livi-helperd/build/Release/livi-helperd
       to: driver/livi-helperd
+    - from: native/livi-gst-video/build/Release/livi-gst-host
+      to: gst-host/livi-gst-host
+    - from: native/livi-helperd/build/Release/livi-core
+      to: core/livi-core
 
 mac:
   identity: '-'
@@ -78,6 +73,7 @@ mac:
   extendInfo:
     NSCameraUsageDescription: LIVI requires camera access for CarPlay.
     NSMicrophoneUsageDescription: LIVI requires microphone access for voice control.
+    NSLocalNetworkUsageDescription: LIVI talks to a LIVI Link dongle on the local network.
     NSDocumentsFolderUsageDescription: LIVI requires access to documents.
     NSDownloadsFolderUsageDescription: LIVI requires access to downloads.
   extraResources:
@@ -87,6 +83,14 @@ mac:
         - '**/*'
         - '!**/*.a'
         - '!share/**'
+    - from: native/livi-helperd/build/Release/livi-helperd
+      to: driver/livi-helperd
+    - from: native/livi-helperd/build/Release/livi-core
+      to: core/livi-core
+    - from: native/livi-gst-video/build/Release/livi-gst-host
+      to: gst-host/livi-gst-host
+    - from: native/livi-gst-video/build/Release/gst_video.node
+      to: video/gst_video.node
 
 dmg:
   artifactName: ${name}-${version}-macos-${arch}.${ext}

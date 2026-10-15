@@ -1,88 +1,68 @@
-import type { Config } from '@shared/types'
+import type {
+  Action,
+  DeviceView,
+  FromCore,
+  Front,
+  Input,
+  Navigation,
+  NowPlaying,
+  PerScreen,
+  Screen,
+  Sessions,
+  System,
+  ToCore,
+  Update
+} from '@shared/core/contract'
+import { CoreSession } from '@shared/core/session'
+import type { Config, TelemetryPayload } from '@shared/types'
 import { create } from 'zustand'
 
-type VolumeStreamKey = 'music' | 'nav' | 'voiceAssistant' | 'call'
-
-export type BluetoothPairedDevice = {
-  mac: string
-  name: string
+type CoreBridge = {
+  connect: (
+    client: string,
+    onMessage: (msg: FromCore) => void,
+    onClose?: () => void
+  ) => { send: (msg: ToCore) => boolean; close: () => void }
 }
 
-type CarplaySettingsApi = {
-  get?: () => Promise<Config>
-  save?: (settings: Partial<Config>) => Promise<void>
-  onUpdate?: (cb: (event: unknown, settings: Config) => void) => () => void
-}
-
-type CarplayUsbApi = {
-  forceReset?: () => Promise<void> | void
-}
-
-type CarplayIpcApi = {
-  setVolume?: (stream: VolumeStreamKey, volume: number) => void
-  setBluetoothPairedList?: (listText: string) => Promise<{ ok: boolean }>
-  connectBluetoothPairedDevice?: (mac: string) => Promise<{ ok: boolean }> | { ok: boolean } | void
-  forgetBluetoothPairedDevice?: (mac: string) => Promise<{ ok: boolean }> | { ok: boolean } | void
-  sendCommand?: (command: string) => void
-  onTelemetry?: (handler: (payload: unknown) => void) => void
-  offTelemetry?: (handler: (payload: unknown) => void) => void
-  getTelemetrySnapshot?: () => Promise<unknown>
-}
-
-type ProjectionApi = {
-  settings?: CarplaySettingsApi
-  usb?: CarplayUsbApi
-  ipc?: CarplayIpcApi
-}
-
-const getProjectionApi = () => {
+const getCoreBridge = (): CoreBridge | null => {
   if (typeof window === 'undefined') return null
-  const w = window as unknown as { projection?: ProjectionApi }
-  return w.projection ?? null
+  return (window as unknown as { core?: CoreBridge }).core ?? null
 }
 
-const clamp01 = (v: number) => Math.max(0, Math.min(1, v))
+let session: CoreSession | null = null
 
-const sendCarplayVolume = (stream: VolumeStreamKey, volume: number) => {
-  const api = getProjectionApi()
-  if (!api?.ipc?.setVolume) return
-  try {
-    api.ipc.setVolume(stream, clamp01(volume))
-  } catch (err) {
-    console.warn('projection-set-volume IPC failed', err)
-  }
+export function coreAction(action: Action): Promise<void> {
+  if (!session) return Promise.reject(new Error('core is not connected'))
+  return session.act(action)
 }
 
-const sendCarplayNightMode = (nightMode: boolean) => {
-  const api = getProjectionApi()
-  if (!api?.ipc?.sendCommand) return
-
-  try {
-    api.ipc.sendCommand(nightMode ? 'enableNightMode' : 'disableNightMode')
-  } catch (err) {
-    console.warn('projection-set-night-mode IPC failed', err)
-  }
+/** The route, only because statusData.json publishes it. */
+export function reportPath(path: string): void {
+  session?.path(path)
 }
 
-const saveSettingsIpc = async (patch: Partial<Config>) => {
-  const api = getProjectionApi()
-  if (!api?.settings?.save) return
-  try {
-    await api.settings.save(patch)
-  } catch (err) {
-    console.warn('settings-save IPC failed', err)
-  }
+export function sendInput(input: Input): void {
+  session?.input(input)
 }
 
-const getSettingsIpc = async (): Promise<Config | null> => {
-  const api = getProjectionApi()
-  if (!api?.settings?.get) return null
-  try {
-    return await api.settings.get()
-  } catch (err) {
-    console.warn('settings-get IPC failed', err)
-    return null
-  }
+/** What a screen shows, so core puts the projection in front. */
+export function reportShown(screen: Screen, front: Front): void {
+  session?.show(screen, front)
+}
+
+/** Whether this window draws the spectrum, core only sends frames while it does. */
+export function reportSpectrum(on: boolean): void {
+  session?.spectrum(on)
+}
+
+/** Whether this window shows the link speed, core only asks the dongle for it then. */
+export function reportLinkSpeed(on: boolean): void {
+  session?.linkSpeed(on)
+}
+
+export function onSpectrum(listener: (bands: number[]) => void): () => void {
+  return session?.onSpectrum(listener) ?? (() => {})
 }
 
 const applyDerivedFromSettings = (s: Config) => {
@@ -90,20 +70,11 @@ const applyDerivedFromSettings = (s: Config) => {
   const navVolume = s.navVolume ?? 0.5
   const voiceAssistantVolume = s.voiceAssistantVolume ?? 0.5
   const callVolume = s.callVolume ?? 1.0
-  const visualAudioDelayMs = s.visualAudioDelayMs ?? 120
 
-  return { audioVolume, navVolume, voiceAssistantVolume, callVolume, visualAudioDelayMs }
+  return { audioVolume, navVolume, voiceAssistantVolume, callVolume }
 }
 
-const applyTelemetryControls = (payload: unknown) => {
-  if (!payload || typeof payload !== 'object') return
-
-  const msg = payload as Record<string, unknown>
-
-  if (typeof msg.nightMode === 'boolean') {
-    void useLiviStore.getState().saveSettings({ nightMode: msg.nightMode })
-  }
-
+const applyTelemetryControls = (msg: TelemetryPayload, prev: TelemetryPayload | null) => {
   const explicitReverse =
     typeof msg.reverse === 'boolean'
       ? msg.reverse
@@ -124,234 +95,85 @@ const applyTelemetryControls = (payload: unknown) => {
     }
   }
 
-  // Momentary navigation request
-  if (typeof msg.path === 'string') {
+  // Momentary navigation request, the snapshot keeps the last one
+  if (typeof msg.path === 'string' && msg.path !== prev?.path) {
     useStatusStore.getState().requestPath(msg.path)
   }
 }
 
-// Projection Store
 export interface CarplayStore {
-  // Full app config (from main, includes defaults)
   settings: Config | null
 
-  // Used by "requires restart" logic
+  sessions: Sessions
+  front: PerScreen<Front> | null
+  nowPlaying: NowPlaying | null
+  navigation: Navigation | null
+
+  system: System | null
+
+  devices: DeviceView[]
+
+  telemetry: TelemetryPayload | null
+
+  update: Update | null
+
   restartBaseline: Config | null
   markRestartBaseline: () => void
 
-  // Bootstrapping
   init: () => void
-  getSettings: () => Promise<void>
 
-  // Save patches (main merges them into config.json)
   saveSettings: (patch: Partial<Config>) => Promise<void>
-  setDarkMode: (darkMode: boolean) => Promise<void>
 
-  // Display resolution
-  negotiatedWidth: number | null
-  negotiatedHeight: number | null
-
-  // USB descriptor
-  vendorId: number | null
-  productId: number | null
-  usbFwVersion: string | null
-  setDeviceInfo: (info: { vendorId: number; productId: number; usbFwVersion: string }) => void
-
-  // USB dongle info
-  dongleFwVersion: string | null
-  boxInfo: unknown | null
-
-  // Audio metadata
-  audioSampleRate: number | null
-  setAudioInfo: (info: { sampleRate: number }) => void
-
-  // PCM data for FFT
-  audioPcmData: Float32Array | null
-  setPcmData: (data: Float32Array) => void
-
-  // Audio settings
   audioVolume: number
   navVolume: number
   voiceAssistantVolume: number
   callVolume: number
-  visualAudioDelayMs: number
 
-  // Audio setters
-  setAudioVolume: (volume: number) => void
-  setNavVolume: (volume: number) => void
-  setVoiceAssistantVolume: (volume: number) => void
-  setCallVolume: (volume: number) => void
-
-  // Bluetooth paired list
-  bluetoothPairedListRaw: string
-  bluetoothPairedDevices: BluetoothPairedDevice[]
-  setBluetoothPairedList: (raw: string) => void
-
-  // Bumped on every audio-device topology change from gst-device-monitor
   audioDevicesRevision: number
-  bumpAudioDevicesRevision: () => void
-
-  // Local edits (pending apply)
-  bluetoothPairedDirty: boolean
-  bluetoothPairedDeleteNeedsRestart: boolean
-  applyBluetoothPairedList: () => Promise<boolean>
-
-  // BT (forget, connect)
-  // warning forget does have a dongle firmware bug!
-  forgetBluetoothPairedDevice: (mac: string) => Promise<boolean>
-  connectBluetoothPairedDevice: (mac: string) => Promise<boolean>
-
-  // Reconstruct text payload to send back to dongle
-  buildBluetoothPairedListText: () => string
-
-  // Reset volatile info
-  resetInfo: () => void
 }
 
 export const useLiviStore = create<CarplayStore>((set, get) => {
   // Prevent double init (strict mode / hot reload)
   let didInit = false
 
-  const parseBluetoothPairedList = (raw: string): BluetoothPairedDevice[] => {
-    const clean = String(raw).replace(/\0+$/g, '')
-    const lines = clean.split('\n')
-
-    const out: BluetoothPairedDevice[] = []
-
-    for (const lineRaw of lines) {
-      const line = String(lineRaw).replace(/\0+$/g, '').replace(/\r$/, '').trim()
-      if (!line) continue
-
-      const mac = line.slice(0, 17)
-      if (mac.length !== 17 || !mac.includes(':')) continue
-
-      const name = line.slice(17).trim()
-      out.push({ mac, name })
-    }
-
-    return out
-  }
-
-  const buildBluetoothPairedListFromDevices = (devices: BluetoothPairedDevice[]): string => {
-    const lines = devices.map((d) => `${d.mac}${String(d.name ?? '').trim()}`)
-    return lines.join('\n') + '\n'
-  }
-
-  const refreshFromMain = async () => {
-    const s = await getSettingsIpc()
-    if (!s) return
-
-    const derived = applyDerivedFromSettings(s)
+  // With no phone connected core takes a change at once, nothing waits for apply.
+  const followCore = (config: Config, sessions: Sessions) => {
     const baseline = get().restartBaseline
-
     set({
-      settings: s,
-      restartBaseline: baseline ?? s,
-      ...derived
+      settings: config,
+      restartBaseline: sessions.total === 0 ? config : (baseline ?? config),
+      ...applyDerivedFromSettings(config)
     })
+  }
 
-    // Keep mixer in sync
-    sendCarplayVolume('music', derived.audioVolume)
-    sendCarplayVolume('nav', derived.navVolume)
-    sendCarplayVolume('voiceAssistant', derived.voiceAssistantVolume)
-    sendCarplayVolume('call', derived.callVolume)
+  const followSessions = (sessions: Sessions) => {
+    set(sessions.total === 0 ? { sessions, restartBaseline: get().settings } : { sessions })
+    const status = useStatusStore.getState()
+    status.setActiveProtocol(sessions.active)
+    status.setStreaming(sessions.active !== null)
+  }
+
+  const followSystem = (system: System, prev: System | undefined) => {
+    const audioChanged =
+      system.audioSinks !== prev?.audioSinks || system.audioSources !== prev?.audioSources
+    set((s) => ({
+      system,
+      audioDevicesRevision: s.audioDevicesRevision + (audioChanged ? 1 : 0)
+    }))
   }
 
   return {
     settings: null,
-
-    bluetoothPairedListRaw: '',
-    bluetoothPairedDevices: [],
-    bluetoothPairedDirty: false,
-    bluetoothPairedDeleteNeedsRestart: false,
+    sessions: { active: null, position: 0, total: 0 },
+    front: null,
+    nowPlaying: null,
+    navigation: null,
+    system: null,
+    devices: [],
+    telemetry: null,
+    update: null,
 
     audioDevicesRevision: 0,
-    bumpAudioDevicesRevision: () =>
-      set((s) => ({ audioDevicesRevision: s.audioDevicesRevision + 1 })),
-
-    setBluetoothPairedList: (raw) => {
-      const clean = String(raw ?? '').replace(/\0+$/g, '')
-      set({
-        bluetoothPairedListRaw: clean,
-        bluetoothPairedDevices: parseBluetoothPairedList(clean),
-        bluetoothPairedDirty: false,
-        bluetoothPairedDeleteNeedsRestart: false
-      })
-    },
-
-    forgetBluetoothPairedDevice: async (mac) => {
-      const api = getProjectionApi()
-      if (!api?.ipc?.forgetBluetoothPairedDevice) return false
-
-      try {
-        const res = await api.ipc.forgetBluetoothPairedDevice(mac)
-        const ok = Boolean(res && typeof res === 'object' && 'ok' in res ? res.ok : true)
-
-        if (ok) {
-          set((s) => {
-            const next = s.bluetoothPairedDevices.filter((d) => d.mac !== mac)
-            return {
-              bluetoothPairedDevices: next,
-              bluetoothPairedListRaw: buildBluetoothPairedListFromDevices(next),
-              bluetoothPairedDirty: false,
-              bluetoothPairedDeleteNeedsRestart: false
-            }
-          })
-        }
-
-        return ok
-      } catch (err) {
-        console.warn('[BT] forgetBluetoothPairedDevice failed', err)
-        return false
-      }
-    },
-
-    connectBluetoothPairedDevice: async (mac) => {
-      const api = getProjectionApi()
-      if (!api?.ipc?.connectBluetoothPairedDevice) return false
-
-      try {
-        const res = await api.ipc.connectBluetoothPairedDevice(mac)
-        return Boolean(res && typeof res === 'object' && 'ok' in res ? res.ok : true)
-      } catch (err) {
-        console.warn('[BT] connectBluetoothPairedDevice failed', err)
-        return false
-      }
-    },
-
-    buildBluetoothPairedListText: () => {
-      const { bluetoothPairedDevices } = get()
-      return buildBluetoothPairedListFromDevices(bluetoothPairedDevices)
-    },
-
-    applyBluetoothPairedList: async () => {
-      const api = getProjectionApi()
-      if (!api?.ipc?.setBluetoothPairedList) return false
-
-      try {
-        const text = get().buildBluetoothPairedListText()
-        const res = await api.ipc.setBluetoothPairedList(text)
-        const ok = Boolean(res?.ok)
-
-        if (ok) {
-          const needsRestart = get().bluetoothPairedDeleteNeedsRestart
-
-          set({
-            bluetoothPairedDirty: false,
-            bluetoothPairedDeleteNeedsRestart: false
-          })
-
-          if (needsRestart) {
-            await api.usb?.forceReset?.()
-          }
-        }
-
-        return ok
-      } catch (err) {
-        console.warn('[BT] applyBluetoothPairedList failed', err)
-        return false
-      }
-    },
 
     restartBaseline: null,
     markRestartBaseline: () => {
@@ -364,162 +186,68 @@ export const useLiviStore = create<CarplayStore>((set, get) => {
       if (didInit) return
       didInit = true
 
-      // initial snapshot
-      void refreshFromMain()
-
-      // live sync: main -> renderer
-      const api = getProjectionApi()
-      if (api?.settings?.onUpdate) {
-        api.settings.onUpdate((_evt, s) => {
-          const derived = applyDerivedFromSettings(s)
-          const baseline = get().restartBaseline
-
-          set({
-            settings: s,
-            restartBaseline: baseline ?? s,
-            ...derived
-          })
-
-          // keep mixer in sync
-          sendCarplayVolume('music', derived.audioVolume)
-          sendCarplayVolume('nav', derived.navVolume)
-          sendCarplayVolume('voiceAssistant', derived.voiceAssistantVolume)
-          sendCarplayVolume('call', derived.callVolume)
+      const bridge = getCoreBridge()
+      if (bridge) {
+        const role = new URLSearchParams(window.location.search).get('role') ?? 'main'
+        const current = new CoreSession((msg) => link.send(msg))
+        session = current
+        current.subscribe((state, prev) => {
+          if (state.config !== prev?.config) {
+            followCore(state.config as unknown as Config, state.sessions)
+          }
+          if (state.sessions !== prev?.sessions) followSessions(state.sessions)
+          if (state.front !== prev?.front) set({ front: state.front })
+          if (state.nowPlaying !== prev?.nowPlaying) set({ nowPlaying: state.nowPlaying })
+          if (state.navigation !== prev?.navigation) set({ navigation: state.navigation })
+          if (state.system !== prev?.system) followSystem(state.system, prev?.system)
+          if (state.devices !== prev?.devices) set({ devices: state.devices })
+          if (state.update !== prev?.update) set({ update: state.update })
+          if (state.telemetry !== prev?.telemetry) {
+            const telemetry = state.telemetry as TelemetryPayload
+            const was = (prev?.telemetry as TelemetryPayload | undefined) ?? null
+            set({ telemetry })
+            applyTelemetryControls(telemetry, was)
+          }
         })
-      }
-
-      if (api?.ipc?.onTelemetry) {
-        // Hydration
-        if (api.ipc.getTelemetrySnapshot) {
-          void api.ipc.getTelemetrySnapshot().then((snap) => {
-            if (snap && typeof snap === 'object' && Object.keys(snap).length > 0) {
-              applyTelemetryControls(snap)
-            }
-          })
-        }
-        api.ipc.onTelemetry((payload) => {
-          applyTelemetryControls(payload)
-        })
+        const link = bridge.connect(
+          `ui:${role}`,
+          (msg) => current.receive(msg),
+          () => current.disconnected()
+        )
       }
     },
 
-    getSettings: async () => {
-      await refreshFromMain()
-    },
-
-    setDarkMode: async (darkMode) => {
-      await get().saveSettings({ darkMode })
-    },
-
-    saveSettings: async (patchArg) => {
-      let patch = patchArg
-
-      // Optimistic merge so UI updates instantly
+    saveSettings: async (patch) => {
+      // Optimistic, so the UI follows at once. Core's patch settles it.
       const prev = get().settings
       if (prev) {
         const merged = { ...prev, ...patch } as Config
-
-        const prevDerived = applyDerivedFromSettings(prev)
-        const derived = applyDerivedFromSettings(merged)
-
-        set({ settings: merged, ...derived })
-
-        if (derived.audioVolume !== prevDerived.audioVolume) {
-          sendCarplayVolume('music', derived.audioVolume)
-        }
-        if (derived.navVolume !== prevDerived.navVolume) {
-          sendCarplayVolume('nav', derived.navVolume)
-        }
-        if (derived.voiceAssistantVolume !== prevDerived.voiceAssistantVolume) {
-          sendCarplayVolume('voiceAssistant', derived.voiceAssistantVolume)
-        }
-        if (derived.callVolume !== prevDerived.callVolume) {
-          sendCarplayVolume('call', derived.callVolume)
-        }
-        if (patch.nightMode !== undefined && Boolean(patch.nightMode) !== Boolean(prev.nightMode)) {
-          sendCarplayNightMode(Boolean(patch.nightMode))
-        }
+        set({ settings: merged, ...applyDerivedFromSettings(merged) })
       }
-
-      // Persist patch in main
-      await saveSettingsIpc(patch)
-
-      // Re-fetch full merged config from main
-      await refreshFromMain()
+      if (!session) return
+      try {
+        await session.act({ kind: 'setConfig', patch })
+      } catch (err) {
+        console.warn('settings not saved', err)
+        session.resync()
+      }
     },
 
-    negotiatedWidth: null,
-    negotiatedHeight: null,
-
-    vendorId: null,
-    productId: null,
-    usbFwVersion: null,
-    setDeviceInfo: ({ vendorId, productId, usbFwVersion }) =>
-      set({
-        vendorId,
-        productId,
-        usbFwVersion: usbFwVersion?.trim() ? usbFwVersion.trim() : null
-      }),
-
-    dongleFwVersion: null,
-    boxInfo: null,
-
-    audioSampleRate: null,
-    setAudioInfo: ({ sampleRate }) => set({ audioSampleRate: sampleRate }),
-
-    audioPcmData: null,
-    setPcmData: (data) => set({ audioPcmData: data }),
-
-    // Defaults until first IPC load arrives
     audioVolume: 0.95,
     navVolume: 0.95,
     voiceAssistantVolume: 0.95,
-    callVolume: 0.95,
-    visualAudioDelayMs: 120,
-
-    setAudioVolume: (audioVolume) => {
-      set({ audioVolume })
-      void get().saveSettings({ audioVolume })
-    },
-    setNavVolume: (navVolume) => {
-      set({ navVolume })
-      void get().saveSettings({ navVolume })
-    },
-    setVoiceAssistantVolume: (voiceAssistantVolume) => {
-      set({ voiceAssistantVolume })
-      void get().saveSettings({ voiceAssistantVolume })
-    },
-    setCallVolume: (callVolume) => {
-      set({ callVolume })
-      void get().saveSettings({ callVolume })
-    },
-
-    resetInfo: () =>
-      set({
-        negotiatedWidth: null,
-        negotiatedHeight: null,
-        vendorId: null,
-        productId: null,
-        usbFwVersion: null,
-        dongleFwVersion: null,
-        boxInfo: null,
-        audioSampleRate: null,
-        audioPcmData: null
-      })
+    callVolume: 0.95
   }
 })
 
-// Auto-init
 useLiviStore.getState().init()
 
-// Status store
-export type ActiveProtocol = 'carplay' | 'androidauto' | 'dongle' | null
+export type ActiveProtocol = 'carplay' | 'androidauto' | null
 
 export interface StatusStore {
   reverse: boolean
   lights: boolean
   activeProtocol: ActiveProtocol
-  isDongleHardwarePresent: boolean
   isStreaming: boolean
   cameraFound: boolean
   clusterDashActive: boolean
@@ -527,7 +255,6 @@ export interface StatusStore {
 
   setCameraFound: (found: boolean) => void
   setActiveProtocol: (protocol: ActiveProtocol) => void
-  setDongleHardwarePresent: (present: boolean) => void
   setStreaming: (streaming: boolean) => void
   setReverse: (reverse: boolean) => void
   setLights: (lights: boolean) => void
@@ -540,7 +267,6 @@ export const useStatusStore = create<StatusStore>((set, get) => ({
   reverse: false,
   lights: false,
   activeProtocol: null,
-  isDongleHardwarePresent: false,
   isStreaming: false,
   cameraFound: false,
   clusterDashActive: false,
@@ -548,16 +274,9 @@ export const useStatusStore = create<StatusStore>((set, get) => ({
 
   setCameraFound: (found) => set({ cameraFound: found }),
   setActiveProtocol: (protocol) => {
-    const wasPresent = get().isDongleHardwarePresent || get().activeProtocol !== null
+    const wasPresent = get().activeProtocol !== null
     set({ activeProtocol: protocol })
-    const nowPresent = get().isDongleHardwarePresent || protocol !== null
-    if (nowPresent && !wasPresent) useLiviStore.getState().markRestartBaseline()
-  },
-  setDongleHardwarePresent: (present) => {
-    const wasPresent = get().isDongleHardwarePresent || get().activeProtocol !== null
-    set({ isDongleHardwarePresent: present })
-    const nowPresent = present || get().activeProtocol !== null
-    if (nowPresent && !wasPresent) useLiviStore.getState().markRestartBaseline()
+    if (protocol !== null && !wasPresent) useLiviStore.getState().markRestartBaseline()
   },
   setStreaming: (streaming) => set({ isStreaming: streaming }),
   setReverse: (reverse) => set({ reverse }),
@@ -567,5 +286,6 @@ export const useStatusStore = create<StatusStore>((set, get) => ({
   clearRequestedPath: () => set({ requestedPath: null })
 }))
 
-export const useProjectionActive = (): boolean =>
-  useStatusStore((s) => s.isDongleHardwarePresent || s.activeProtocol !== null)
+export const useProjectionActive = (): boolean => useStatusStore((s) => s.activeProtocol !== null)
+
+export const useSessionsOpen = (): boolean => useLiviStore((s) => s.sessions.total > 0)

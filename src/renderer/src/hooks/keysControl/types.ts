@@ -1,4 +1,20 @@
-import { KeyCommand } from '../../components/worker/types'
+export type KeyCommand =
+  | 'left'
+  | 'right'
+  | 'selectDown'
+  | 'selectUp'
+  | 'back'
+  | 'down'
+  | 'home'
+  | 'play'
+  | 'pause'
+  | 'playPause'
+  | 'next'
+  | 'prev'
+  | 'acceptPhone'
+  | 'rejectPhone'
+  | 'voiceAssistant'
+  | 'voiceAssistantRelease'
 
 export type BindKey =
   | 'left'
@@ -27,6 +43,4 @@ export type useKeyDownProps = {
   moveFocusLinear: (delta: -1 | 1) => boolean
   isFormField: (el: HTMLElement | null) => boolean
   activateControl: (el: HTMLElement | null) => boolean
-  onSetKeyCommand: (mappedAction: KeyCommand) => void
-  onSetCommandCounter: (p: (_p: number) => number) => void
 }

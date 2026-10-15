@@ -65,11 +65,11 @@ pub fn decoder_candidates(codec: &str, sw_only: bool) -> &'static [&'static CStr
     }
     #[cfg(target_os = "macos")]
     {
-        // HEVC on macOS goes through avdec_h265. vtdec ignores
-        // sps_max_num_reorder_pics and adds output latency.
+        // The bundled vtdec carries scripts/gstreamer/patches/gst-plugins-bad/0007,
+        // so HEVC decodes low-latency in hardware.
         // https://gitlab.freedesktop.org/gstreamer/gstreamer/-/work_items/5133
         match codec {
-            "h265" => &[c"avdec_h265", c"vtdec"],
+            "h265" => &[c"vtdec", c"avdec_h265"],
             "vp9" => &[c"vp9dec"],
             "av1" => &[c"dav1ddec"],
             _ => &[c"vtdec", c"avdec_h264"],
@@ -84,6 +84,40 @@ pub fn decoder_candidates(codec: &str, sw_only: bool) -> &'static [&'static CStr
             _ => &[c"v4l2slh264dec", c"v4l2h264dec", c"vah264dec", c"avdec_h264"],
         }
     }
+}
+
+/// The GPU livi-compositor renders on. A decoded frame only reaches it as a
+/// dmabuf when the decoder sits on that same GPU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpu {
+    Nvidia,
+    /// Any other driver, by its render node name, e.g. "renderD128".
+    Node(String),
+}
+
+/// Decoder candidates for `codec` on `gpu`, best first. NVIDIA gets NVDEC,
+/// another GPU the VA decoder of its own node ahead of the unnamed one, which
+/// sits on the first VA device and needs its device path checked.
+pub fn decoder_candidates_on(codec: &str, sw_only: bool, gpu: &RenderGpu) -> Vec<String> {
+    let mut names = Vec::new();
+    if !sw_only && *gpu == RenderGpu::Nvidia {
+        let c = match codec {
+            "h265" | "vp9" | "av1" => codec,
+            _ => "h264",
+        };
+        names.push(format!("nv{c}dec"));
+    }
+    for name in decoder_candidates(codec, sw_only).iter().filter_map(|n| n.to_str().ok()) {
+        match gpu {
+            RenderGpu::Nvidia if is_hw_decoder(name) => continue,
+            RenderGpu::Node(node) if name.starts_with("va") => {
+                names.push(format!("va{node}{}", &name[2..]));
+            }
+            _ => {}
+        }
+        names.push(name.to_owned());
+    }
+    names
 }
 
 /// Codec names the caller may pass. Anything else is read as h264.
@@ -117,7 +151,8 @@ pub fn presink(decoder: &str) -> &'static str {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        if is_hw_decoder(decoder) { "" } else { "videoconvert ! " }
+        // NVDEC hands out plain frames as well, it shares no memory with the compositor.
+        if is_hw_decoder(decoder) && !decoder.starts_with("nv") { "" } else { "videoconvert ! " }
     }
 }
 
@@ -229,6 +264,42 @@ mod tests {
             assert_eq!(decoder_candidates(name, true)[0], sw_decoder_for(name));
         }
     }
+
+    #[test]
+    fn nvidia_gets_nvdec_and_no_decoder_of_another_gpu() {
+        assert_eq!(
+            decoder_candidates_on("h265", false, &RenderGpu::Nvidia),
+            ["nvh265dec", "avdec_h265"]
+        );
+        assert_eq!(
+            decoder_candidates_on("mpeg2", false, &RenderGpu::Nvidia),
+            ["nvh264dec", "avdec_h264"]
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn another_gpu_tries_the_va_decoder_of_its_own_node_first() {
+        let names = decoder_candidates_on("h265", false, &RenderGpu::Node("renderD129".into()));
+        let own = names.iter().position(|n| n == "varenderD129h265dec").unwrap();
+        let first = names.iter().position(|n| n == "vah265dec").unwrap();
+        assert!(own < first);
+        assert_eq!(names.last().unwrap(), "avdec_h265");
+    }
+
+    #[test]
+    fn software_only_stays_software_on_every_gpu() {
+        for gpu in [RenderGpu::Nvidia, RenderGpu::Node("renderD128".into())] {
+            assert_eq!(decoder_candidates_on("h264", true, &gpu), ["avdec_h264"]);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn nvdec_frames_are_converted_before_the_sink() {
+        assert_eq!(presink("nvh265dec"), "videoconvert ! ");
+        assert_eq!(presink("vah265dec"), "");
+    }
 }
 
 #[cfg(test)]
@@ -312,7 +383,10 @@ mod pipeline_tests {
         assert_eq!(sink_chain(None), "waylandsink name=sink sync=false");
         assert_eq!(sink_chain(Some("")), "waylandsink name=sink sync=false");
         assert_eq!(sink_chain(Some("fakesink")), "fakesink name=sink sync=false");
-        assert!(pipeline_desc("h264", "avdec_h264", "", Some("fakesink")).contains("fakesink name=sink"));
+        assert!(
+            pipeline_desc("h264", "avdec_h264", "", Some("fakesink"))
+                .contains("fakesink name=sink")
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -323,4 +397,3 @@ mod pipeline_tests {
         assert_eq!(presink("avdec_h264"), "");
     }
 }
-

@@ -1,4 +1,4 @@
-import { useLiviStore } from '@store/store'
+import { coreAction, useLiviStore, useSessionsOpen } from '@store/store'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { requiresRestartParams } from '../constants'
 import { getValueByPath, setValueByPath } from '../utils'
@@ -24,6 +24,8 @@ export function useSmartSettings<T extends Record<string, unknown>>(
   const [state, setState] = useState<T>(() => ({ ...initial }))
   const [restartRequested, setRestartRequested] = useState(false)
 
+  const sessionsOpen = useSessionsOpen()
+
   const saveSettings = useLiviStore((s) => s.saveSettings)
   const restartBaseline = useLiviStore((s) => s.restartBaseline)
   const markRestartBaseline = useLiviStore((s) => s.markRestartBaseline)
@@ -40,7 +42,9 @@ export function useSmartSettings<T extends Record<string, unknown>>(
     [state, settings]
   )
 
+  // With no phone connected core applies every change itself.
   const needsRestartFromConfig = useMemo(() => {
+    if (!sessionsOpen) return false
     const cfg = (settings ?? {}) as Record<string, unknown>
     const baseline = (restartBaseline ?? settings ?? {}) as Record<string, unknown>
 
@@ -49,7 +53,7 @@ export function useSmartSettings<T extends Record<string, unknown>>(
       if (JSON.stringify(cfg[key]) !== JSON.stringify(baseline[key])) return true
     }
     return false
-  }, [settings, restartBaseline])
+  }, [settings, restartBaseline, sessionsOpen])
 
   const needsRestart = useMemo(() => {
     return Boolean(needsRestartFromConfig || restartRequested)
@@ -85,7 +89,11 @@ export function useSmartSettings<T extends Record<string, unknown>>(
   const restart = async () => {
     if (!needsRestart) return false
 
-    await window.projection.ipc.restart()
+    try {
+      await coreAction({ kind: 'applySettings' })
+    } catch {
+      return false
+    }
 
     markRestartBaseline()
     setRestartRequested(false)

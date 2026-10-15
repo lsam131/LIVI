@@ -1,7 +1,7 @@
 import type { Config } from '@shared/types'
+import { IconUploader } from '../../components/pages/settings/pages/appearance/iconUploader/IconUploader'
 import { ColorCalibration } from '../../components/pages/settings/pages/displayCalibration/ColorCalibration'
 import { ContrastGammaCalibration } from '../../components/pages/settings/pages/displayCalibration/ContrastGammaCalibration'
-import { IconUploader } from '../../components/pages/settings/pages/system/iconUploader/IconUploader'
 import { SettingsNode, ValueTransform } from '../types'
 
 const brightnessValueTransform: ValueTransform<number | undefined, number> = {
@@ -49,6 +49,13 @@ export const appearanceSchema: SettingsNode<Config> = {
       labelKey: 'settings.darkMode',
       icon: 'darkMode',
       path: 'darkMode'
+    },
+    {
+      type: 'checkbox',
+      label: 'Overlay Messages',
+      labelKey: 'settings.overlayMessages',
+      icon: 'overlayMessages',
+      path: 'overlayMessages'
     },
     {
       type: 'select',
@@ -166,7 +173,7 @@ export const appearanceSchema: SettingsNode<Config> = {
           type: 'custom',
           label: 'UI Icon',
           labelKey: 'settings.uiIcon',
-          path: 'dongleIcon180',
+          path: 'carplayIcon180',
           component: IconUploader
         }
       ]

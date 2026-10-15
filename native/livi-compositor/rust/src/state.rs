@@ -8,12 +8,14 @@ use std::time::Instant;
 use smithay::input::{Seat, SeatState};
 use smithay::output::Output;
 use smithay::reexports::calloop::generic::Generic;
-use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
+use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::wayland_server::backend::ClientData;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
 use smithay::utils::{Logical, Point};
 use smithay::wayland::compositor::CompositorState;
+use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::dmabuf::DmabufState;
+use smithay::wayland::drm_syncobj::DrmSyncobjState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState};
@@ -83,17 +85,17 @@ pub struct Screen {
     pub req_height: i32,
     pub fullscreen: bool,
     pub output: Option<Output>,
+    // Resize debounce: the output mode and video relayout wait until the drag settles.
+    pub resize_pending: Option<Instant>,
+    pub applied_width: i32,
+    pub applied_height: i32,
     pub backdrop_color: [f32; 4],
     pub has_backdrop_color: bool,
 }
 
 impl Screen {
     pub fn top_inset(&self) -> i32 {
-        if self.fullscreen {
-            0
-        } else {
-            TITLEBAR_H
-        }
+        if self.fullscreen { 0 } else { TITLEBAR_H }
     }
 }
 
@@ -118,7 +120,13 @@ pub struct LiviState {
     pub data_device_state: DataDeviceState,
     pub shm_state: ShmState,
     pub dmabuf_state: DmabufState,
+    /// The DRM node the renderer runs on, handed to the inner UI so its video decodes on the same GPU.
+    pub render_node: Option<std::path::PathBuf>,
+    /// Set by host::init when the render node supports explicit sync.
+    pub syncobj_state: Option<DrmSyncobjState>,
+    pub loop_handle: LoopHandle<'static, LiviState>,
     pub _viewporter_state: ViewporterState,
+    pub _cursor_shape_state: CursorShapeManagerState,
 
     pub output_app_id: String,
     pub screens: Vec<Screen>,
@@ -153,7 +161,10 @@ pub struct ClientState {
 impl ClientData for ClientState {}
 
 impl LiviState {
-    pub fn new(event_loop: &mut EventLoop<'static, LiviState>, startup_cmd: Option<String>) -> Self {
+    pub fn new(
+        event_loop: &mut EventLoop<'static, LiviState>,
+        startup_cmd: Option<String>,
+    ) -> Self {
         let mut display: Display<LiviState> = Display::new().expect("wayland display");
         let dh = display.handle();
 
@@ -166,6 +177,7 @@ impl LiviState {
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
         let dmabuf_state = DmabufState::new();
         let viewporter_state = ViewporterState::new::<Self>(&dh);
+        let cursor_shape_state = CursorShapeManagerState::new::<Self>(&dh);
 
         // Wayland server socket the inner UI + gst-host connect to.
         let source = ListeningSocketSource::new_auto().expect("wayland socket");
@@ -182,16 +194,13 @@ impl LiviState {
         // Dispatch inner-client requests from the display's poll fd.
         let poll_fd = display.backend().poll_fd().try_clone_to_owned().unwrap();
         loop_handle
-            .insert_source(
-                Generic::new(poll_fd, Interest::READ, Mode::Level),
-                {
-                    let mut display = display;
-                    move |_, _, state: &mut LiviState| {
-                        display.dispatch_clients(state).unwrap();
-                        Ok(PostAction::Continue)
-                    }
-                },
-            )
+            .insert_source(Generic::new(poll_fd, Interest::READ, Mode::Level), {
+                let mut display = display;
+                move |_, _, state: &mut LiviState| {
+                    display.dispatch_clients(state).unwrap();
+                    Ok(PostAction::Continue)
+                }
+            })
             .expect("insert display source");
 
         let kiosk = std::env::var("LIVI_KIOSK").map(|v| v != "0").unwrap_or(false);
@@ -211,6 +220,9 @@ impl LiviState {
                 req_height: 0,
                 fullscreen: kiosk,
                 output: None,
+                resize_pending: None,
+                applied_width: 0,
+                applied_height: 0,
                 backdrop_color: [0.0, 0.0, 0.0, 1.0],
                 has_backdrop_color: false,
             })
@@ -231,19 +243,18 @@ impl LiviState {
             data_device_state,
             shm_state,
             dmabuf_state,
+            render_node: None,
+            syncobj_state: None,
+            loop_handle: loop_handle.clone(),
             _viewporter_state: viewporter_state,
+            _cursor_shape_state: cursor_shape_state,
             output_app_id,
             screens,
             toplevels: Vec::new(),
             video_order: Vec::new(),
             pending_video_tags: VecDeque::new(),
             video_cfgs: Vec::new(),
-            cal: CalState {
-                active: false,
-                gamma: 1.0,
-                contrast: 1.0,
-                gain: [1.0, 1.0, 1.0],
-            },
+            cal: CalState { active: false, gamma: 1.0, contrast: 1.0, gain: [1.0, 1.0, 1.0] },
             host: HostState::new(),
             ctrl_client: None,
             ctrl_buf: String::new(),
@@ -265,26 +276,23 @@ impl LiviState {
         if let Some(i) = self.video_cfgs.iter().position(|c| c.tag == tag) {
             return &mut self.video_cfgs[i];
         }
-        self.video_cfgs.push(VideoCfg {
-            tag: tag.to_string(),
-            ..Default::default()
-        });
+        self.video_cfgs.push(VideoCfg { tag: tag.to_string(), ..Default::default() });
         self.video_cfgs.last_mut().unwrap()
     }
 
     pub fn find_video_by_tag(&self, tag: &str) -> Option<usize> {
-        self.toplevels
-            .iter()
-            .position(|t| t.kind == Kind::Video && t.tag == tag)
+        self.toplevels.iter().position(|t| t.kind == Kind::Video && t.tag == tag)
     }
 
     /// Housekeeping after each loop turn: flush clients, drive host redraws,
     /// check the restart deadline.
     pub fn after_dispatch(&mut self) {
         if let Some(deadline) = self.restart_deadline
-            && Instant::now() >= deadline {
-                crate::spawn::force_restart(self);
-            }
+            && Instant::now() >= deadline
+        {
+            crate::spawn::force_restart(self);
+        }
+        crate::host::apply_settled_resizes(self);
         crate::host::pump(self);
         self.display_handle.flush_clients().ok();
     }
